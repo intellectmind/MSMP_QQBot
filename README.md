@@ -6,6 +6,7 @@
 #### 支持独立启动我的世界服务端（可外部接入），或者使用QQ机器人启动服务端（此时MSMP_QQBot会捕获服务端控制台输出）  
 #### window用户：直接下载`releases`中的exe文件，双击运行即可  
 #### Linux等其它用户可下载源代码运行  
+<img width="653" height="728" alt="image" src="https://github.com/user-attachments/assets/5d3627b1-d886-45a6-8450-1bad5a7c5b17" />
 
 ----------------------------------------------------------------------------------------------------------
 
@@ -14,12 +15,25 @@
 ```
 # Minecraft Server Management Protocol (MSMP) 配置
 msmp:
+  # 是否启用MSMP（推荐：功能最完整，需版本1.21.9+）
+  enabled: true
   # MSMP服务器地址
-  host: "localhost"
+  host: localhost
   # MSMP端口 (需要在服务端配置文件中设置 management-server-port)
   port: 21111
   # MSMP认证令牌 (需要在服务端配置文件中设置 management-server-secret)
-  password: "your_msmp_password_here"
+  password: your_msmp_password_here
+
+# RCON连接配置
+rcon:
+  # 是否启用RCON（备用方案，与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
+  enabled: false
+  # RCON服务器地址
+  host: localhost
+  # RCON端口
+  port: 25575
+  # RCON密码
+  password: your_rcon_password_here
 
 # WebSocket反向连接配置
 websocket:

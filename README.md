@@ -36,10 +36,12 @@
   启动Minecraft服务器  
 • reload / 重载 / /reload  
   重新加载配置文件  
+• log / 日志 / /log  
+  查看最近20条的服务器日志  
 
 直接命令执行:  
 • !<命令>  
-  管理员可使用 ! 前缀直接执行服务器命令，需要启用RCON  
+  管理员可使用 ! 前缀直接执行服务器命令，需启用RCON  
   示例: !say Hello 或 !give @a diamond  
 
 ----------------------------------------------------------------------------------------------------------
@@ -66,8 +68,8 @@ msmp:
 
 # RCON连接配置
 rcon:
-  # 是否启用RCON（备用方案，与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
-  enabled: false
+  # 是否启用RCON（与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
+  enabled: true
   # RCON服务器地址
   host: localhost
   # RCON端口
@@ -127,7 +129,7 @@ advanced:
   # 命令冷却时间（秒）- 防止命令刷屏
   command_cooldown: 3
   # 最大消息长度
-  max_message_length: 500
+  max_message_length: 2500
   # 玩家列表缓存时间（秒）
   player_list_cache_ttl: 5
 

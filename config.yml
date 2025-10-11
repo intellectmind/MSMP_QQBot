@@ -13,8 +13,8 @@ msmp:
 
 # RCON连接配置
 rcon:
-  # 是否启用RCON（备用方案，与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
-  enabled: false
+  # 是否启用RCON（与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
+  enabled: true
   # RCON服务器地址
   host: localhost
   # RCON端口
@@ -74,7 +74,7 @@ advanced:
   # 命令冷却时间（秒）- 防止命令刷屏
   command_cooldown: 3
   # 最大消息长度
-  max_message_length: 500
+  max_message_length: 2500
   # 玩家列表缓存时间（秒）
   player_list_cache_ttl: 5
 

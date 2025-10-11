@@ -153,7 +153,7 @@ class CommandHandler:
             
             lines.append("\n直接命令执行:")
             lines.append("• !<命令>")
-            lines.append("  管理员可使用 ! 前缀直接执行服务器命令")
+            lines.append("  管理员可使用 ! 前缀直接执行服务器命令，需启用RCON")
             lines.append("  示例: !say Hello 或 !give @a diamond")
         
         lines.append("\n━━━━━━━━━━━━━━")
@@ -387,3 +387,66 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"重新加载配置失败: {e}")
             return f"重新加载配置失败: {e}"
+
+    async def handle_log(self, user_id: int, **kwargs) -> str:
+        """处理log命令 - 显示最近的服务器日志"""
+        try:
+            # 检查是否有服务器进程在运行
+            server_running = self.qq_server.server_process and self.qq_server.server_process.poll() is None
+            
+            # 获取最近的日志（优先从内存获取）
+            recent_logs = self.qq_server.get_recent_logs(20)
+            
+            if not recent_logs:
+                # 如果内存中没有日志，尝试从文件读取
+                file_logs = self._read_recent_logs_from_file(10)
+                if file_logs:
+                    lines = [f"最近 {len(file_logs)} 条服务器日志 (从文件读取):"]
+                    lines.append("━━━━━━━━━━━━━━")
+                    lines.extend(file_logs)
+                    lines.append("━━━━━━━━━━━━━━")
+                    lines.append("提示: 服务器当前未运行，显示的是历史日志")
+                    return "\n".join(lines)
+                else:
+                    return "暂无服务器日志输出"
+            
+            # 构建响应消息
+            status = "运行中" if server_running else "已停止"
+            lines = [f"最近 {len(recent_logs)} 条服务器日志 (服务器{status}):"]
+            lines.append("━━━━━━━━━━━━━━")
+            
+            for log in recent_logs:
+                # 限制单条日志长度，避免消息过长
+                if len(log) > 100:
+                    log = log[:100] + "..."
+                lines.append(log)
+            
+            lines.append("━━━━━━━━━━━━━━")
+            if server_running:
+                lines.append("提示: 日志实时更新，再次发送 log 查看最新日志")
+            else:
+                lines.append("提示: 服务器已停止，日志不再更新")
+            
+            return "\n".join(lines)
+            
+        except Exception as e:
+            self.logger.error(f"执行log命令失败: {e}", exc_info=True)
+            return f"获取日志失败: {e}"
+
+    def _read_recent_logs_from_file(self, lines: int = 10) -> List[str]:
+        """从日志文件读取最近的日志"""
+        try:
+            log_file_path = "mc_server.log"
+            if not os.path.exists(log_file_path):
+                return []
+            
+            # 读取文件最后几行
+            with open(log_file_path, 'r', encoding='utf-8') as f:
+                # 简单的方法：读取所有行然后取最后几行
+                all_lines = f.readlines()
+                recent_lines = all_lines[-lines:] if len(all_lines) >= lines else all_lines
+                return [line.strip() for line in recent_lines if line.strip()]
+                
+        except Exception as e:
+            self.logger.error(f"读取日志文件失败: {e}")
+            return []

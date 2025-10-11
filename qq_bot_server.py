@@ -31,7 +31,17 @@ class QQBotWebSocketServer:
         self.connected_clients = set()
         self.server_process = None  # 存储服务器进程
         
-        # 初始化命令处理器
+        # 添加服务器日志存储
+        self.server_logs = []
+        self.max_log_lines = 100  # 最多存储100条日志
+        
+        # 添加日志文件相关属性
+        self.server_log_file = None
+        self.log_file_path = "mc_server.log"
+        self.max_log_file_size = 10 * 1024 * 1024  # 10MB
+        self.backup_count = 5
+
+        # 初始化命令系统
         self.command_handler = None
         self.command_handlers = None
         self._init_command_system()
@@ -102,7 +112,16 @@ class QQBotWebSocketServer:
             usage='reload',
             cooldown=30
         )
-        
+
+        self.command_handler.register_command(
+            names=['log', '日志', '/log', '服务器日志'],
+            handler=self.command_handlers.handle_log,
+            admin_only=True,
+            description='查看最近20条的服务器日志',
+            usage='log',
+            cooldown=10
+        )
+            
         self.logger.info(f"已注册 {len(self.command_handler.list_commands())} 个命令")
     
     async def start(self):
@@ -531,6 +550,9 @@ class QQBotWebSocketServer:
     async def _start_server_process(self, websocket, group_id: int = 0, private_user_id: int = None):
         """启动服务器进程(由命令处理器调用)"""
         try:
+            # 设置日志文件
+            self._setup_log_file()
+            
             start_script = self.config_manager.get_server_start_script()
             working_dir = self.config_manager.get_server_working_directory()
             if not working_dir:
@@ -595,7 +617,7 @@ class QQBotWebSocketServer:
         await asyncio.sleep(0.1)
 
     async def _read_server_output(self):
-        """读取服务器输出并在控制台显示"""
+        """读取服务器输出并在控制台显示，同时存储日志"""
         if not self.server_process:
             return
         
@@ -617,6 +639,9 @@ class QQBotWebSocketServer:
                             # 直接输出到控制台,带前缀
                             print(f"[MC Server] {line}")
                             
+                            # 存储日志到列表
+                            self._store_server_log(line)
+                            
                             # 检查服务器启动完成的关键词
                             if self._is_server_ready(line):
                                 self.logger.info("检测到服务器启动完成")
@@ -634,6 +659,93 @@ class QQBotWebSocketServer:
                 
         except Exception as e:
             self.logger.error(f"读取服务器输出失败: {e}", exc_info=True)
+
+    def _setup_log_file(self):
+        """设置日志文件"""
+        try:
+            # 如果文件太大，先进行轮转
+            if os.path.exists(self.log_file_path):
+                file_size = os.path.getsize(self.log_file_path)
+                if file_size > self.max_log_file_size:
+                    self._rotate_log_file()
+            
+            # 打开日志文件（追加模式）
+            self.server_log_file = open(self.log_file_path, 'a', encoding='utf-8', buffering=1)  # 行缓冲
+            self.logger.info(f"服务器日志文件已打开: {self.log_file_path}")
+            
+        except Exception as e:
+            self.logger.error(f"设置日志文件失败: {e}")
+
+    def _rotate_log_file(self):
+        """轮转日志文件"""
+        try:
+            if os.path.exists(self.log_file_path):
+                # 删除最旧的备份文件
+                oldest_backup = f"{self.log_file_path}.{self.backup_count}"
+                if os.path.exists(oldest_backup):
+                    os.remove(oldest_backup)
+                
+                # 重命名现有的备份文件
+                for i in range(self.backup_count - 1, 0, -1):
+                    old_name = f"{self.log_file_path}.{i}"
+                    new_name = f"{self.log_file_path}.{i + 1}"
+                    if os.path.exists(old_name):
+                        os.rename(old_name, new_name)
+                
+                # 重命名当前日志文件
+                backup_name = f"{self.log_file_path}.1"
+                os.rename(self.log_file_path, backup_name)
+                
+                self.logger.info(f"已轮转日志文件: {self.log_file_path} -> {backup_name}")
+                
+        except Exception as e:
+            self.logger.error(f"轮转日志文件失败: {e}")
+
+    def _write_to_log_file(self, log_line: str):
+        """写入日志到文件"""
+        if self.server_log_file and not self.server_log_file.closed:
+            try:
+                self.server_log_file.write(log_line + '\n')
+                self.server_log_file.flush()  # 确保立即写入
+            except Exception as e:
+                self.logger.error(f"写入日志文件失败: {e}")
+
+    def _close_log_file(self):
+        """关闭日志文件"""
+        if self.server_log_file and not self.server_log_file.closed:
+            try:
+                self.server_log_file.close()
+                self.logger.info("服务器日志文件已关闭")
+            except Exception as e:
+                self.logger.error(f"关闭日志文件失败: {e}")
+
+    def _store_server_log(self, log_line: str):
+        """存储服务器日志到内存和文件"""
+        # 添加时间戳
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        formatted_log = f"[{timestamp}] {log_line}"
+        
+        # 添加到内存日志列表
+        self.server_logs.append(formatted_log)
+        
+        # 限制内存中的日志数量
+        if len(self.server_logs) > self.max_log_lines:
+            self.server_logs = self.server_logs[-self.max_log_lines:]
+        
+        # 写入到日志文件
+        self._write_to_log_file(formatted_log)
+        
+        # 调试输出
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(f"存储服务器日志: {log_line[:100]}...")
+
+    def get_recent_logs(self, lines: int = 20) -> List[str]:
+        """获取最近的服务器日志"""
+        if not self.server_logs:
+            return ["暂无服务器日志"]
+        
+        return self.server_logs[-lines:]
 
     def _is_server_ready(self, line: str) -> bool:
         """检查服务器是否启动完成"""
@@ -724,6 +836,9 @@ class QQBotWebSocketServer:
             
             self.logger.info(f"服务器进程退出,返回码: {return_code}")
             
+            # 关闭日志文件
+            self._close_log_file()
+            
             if return_code == 0:
                 message = "服务器正常关闭"
             else:
@@ -740,3 +855,4 @@ class QQBotWebSocketServer:
         except Exception as e:
             self.logger.error(f"监控服务器进程失败: {e}", exc_info=True)
             self.server_process = None
+            self._close_log_file()

@@ -49,7 +49,7 @@ class ConfigManager:
                 'password': 'your_msmp_password_here'
             },
             'rcon': {
-                'enabled': False,
+                'enabled': True,
                 'host': 'localhost',
                 'port': 25575,
                 'password': 'your_rcon_password_here'
@@ -79,7 +79,8 @@ class ConfigManager:
                 'reconnect_interval': 300,
                 'heartbeat_interval': 30,
                 'command_cooldown': 3,
-                'max_message_length': 500
+                'max_message_length': 2500,
+                'player_list_cache_ttl': 5
             },
             'debug': False
         }

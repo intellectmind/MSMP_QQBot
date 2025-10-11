@@ -15,7 +15,7 @@
 ```
 # Minecraft Server Management Protocol (MSMP) 配置
 msmp:
-  # 是否启用MSMP（推荐：功能最完整，需版本1.21.9+）
+  # 是否启用MSMP（推荐：功能最完整，需版本1.21.9+，注意关闭tls）
   enabled: true
   # MSMP服务器地址
   host: localhost

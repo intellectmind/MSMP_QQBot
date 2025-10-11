@@ -8,7 +8,7 @@
     QQBot控制台命令:
       help    - 显示此帮助
       status  - 显示连接状态
-      exit    - 退出程序
+      exit    - 停止MSMP_QQBot服务
       其他命令将直接发送到Minecraft服务器  
       
 #### window用户：直接下载`releases`中的exe文件，双击运行即可  

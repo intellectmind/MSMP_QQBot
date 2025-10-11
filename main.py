@@ -309,6 +309,9 @@ class MsmpQQBot(ServerEventListener):
         await self.start()
         
         try:
+            # 启动控制台输入处理任务
+            console_input_task = asyncio.create_task(self._handle_console_input())
+            
             # 保持主循环运行
             while self.running:
                 await asyncio.sleep(1)
@@ -316,8 +319,99 @@ class MsmpQQBot(ServerEventListener):
         except KeyboardInterrupt:
             self.logger.info("收到中断信号，正在停止...")
         finally:
+            console_input_task.cancel()
             await self.stop()
 
+    async def _handle_console_input(self):
+        """处理控制台输入并转发到Minecraft服务器"""
+        import sys
+        loop = asyncio.get_event_loop()
+        
+        while self.running:
+            try:
+                # 异步读取控制台输入
+                line = await loop.run_in_executor(None, sys.stdin.readline)
+                if line:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # 检查是否是QQBot命令
+                    if await self._handle_qqbot_command(line):
+                        continue
+                    
+                    # 否则转发到Minecraft服务器
+                    await self._forward_to_minecraft_server(line)
+                        
+            except Exception as e:
+                self.logger.error(f"处理控制台输入失败: {e}")
+                await asyncio.sleep(1)
+
+    async def _handle_qqbot_command(self, command: str) -> bool:
+        """处理QQBot命令，返回True如果是QQBot命令"""
+        command_lower = command.lower()
+        
+        # QQBot系统命令
+        if command_lower in ['status', 'exit']:
+            if command_lower == 'status':
+                status_info = await self._get_connection_status()
+                print(status_info)
+            elif command_lower == 'exit':
+                self.logger.info("收到退出命令")
+                self.running = False
+            return True
+        
+        return False
+
+    async def _forward_to_minecraft_server(self, command: str):
+        """转发命令到Minecraft服务器"""
+        try:
+            if (self.qq_server and 
+                self.qq_server.server_process and 
+                self.qq_server.server_process.poll() is None):
+                
+                # 发送命令到服务器进程
+                self.qq_server.server_process.stdin.write(command + '\n')
+                self.qq_server.server_process.stdin.flush()
+                self.logger.debug(f"已转发命令到服务器: {command}")
+            else:
+                print("错误: Minecraft服务器未运行")
+                
+        except Exception as e:
+            self.logger.error(f"转发命令到服务器失败: {e}")
+
+    async def _get_connection_status(self) -> str:
+        """获取连接状态信息"""
+        lines = ["系统连接状态:"]
+        
+        # QQ连接状态
+        qq_status = "已连接" if (self.qq_server and self.qq_server.is_connected()) else "未连接"
+        lines.append(f"QQ机器人: {qq_status}")
+        
+        # MSMP状态
+        if self.config_manager.is_msmp_enabled():
+            if self.msmp_client and self.msmp_client.is_connected():
+                lines.append("MSMP: 已连接")
+            else:
+                lines.append("MSMP: 未连接")
+        
+        # RCON状态
+        if self.config_manager.is_rcon_enabled():
+            if self.rcon_client and self.rcon_client.is_connected():
+                lines.append("RCON: 已连接")
+            else:
+                lines.append("RCON: 未连接")
+        
+        # 服务器进程状态
+        if self.qq_server and self.qq_server.server_process:
+            if self.qq_server.server_process.poll() is None:
+                lines.append(f"服务器进程: 运行中 (PID: {self.qq_server.server_process.pid})")
+            else:
+                lines.append("服务器进程: 已停止")
+        else:
+            lines.append("服务器进程: 未启动")
+        
+        return "\n".join(lines)
 
 def main():
     """主函数"""

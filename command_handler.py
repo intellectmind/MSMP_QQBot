@@ -1,6 +1,7 @@
 import time
 import logging
-import os  # 添加这行
+import os
+import re
 from typing import Callable, Dict, List, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
@@ -89,7 +90,7 @@ class CommandHandler:
         
         # 检查管理员权限
         if command.admin_only and not self.config_manager.is_admin(user_id):
-            return "权限不足：此命令仅限管理员使用"
+            return "权限不足:此命令仅限管理员使用"
         
         # 检查冷却时间
         can_use, remaining = self.rate_limiter.can_use(
@@ -99,7 +100,7 @@ class CommandHandler:
         )
         
         if not can_use:
-            return f"命令冷却中，请等待 {remaining} 秒"
+            return f"命令冷却中,请等待 {remaining} 秒"
         
         # 执行命令
         try:
@@ -149,9 +150,14 @@ class CommandHandler:
                 lines.append(f"• {aliases}")
                 if cmd.description:
                     lines.append(f"  {cmd.description}")
+            
+            lines.append("\n直接命令执行:")
+            lines.append("• !<命令>")
+            lines.append("  管理员可使用 ! 前缀直接执行服务器命令")
+            lines.append("  示例: !say Hello 或 !give @a diamond")
         
         lines.append("\n━━━━━━━━━━━━━━")
-        lines.append("提示: 直接输入命令，无需斜杠")
+        lines.append("提示: 直接输入命令,无需斜杠")
         
         return "\n".join(lines)
     
@@ -171,7 +177,7 @@ class CommandHandlers:
     """命令处理器集合"""
     
     def __init__(self, msmp_client, rcon_client, qq_server, config_manager, logger):
-        # 不直接保存 msmp_client，而是保存 qq_server
+        # 不直接保存 msmp_client,而是保存 qq_server
         # 然后通过 qq_server.msmp_client 动态获取
         self.qq_server = qq_server
         self.rcon_client = rcon_client
@@ -184,8 +190,8 @@ class CommandHandlers:
         return self.qq_server.msmp_client if self.qq_server else None
     
     def _get_active_client(self):
-        """获取当前可用的客户端（优先MSMP，其次RCON）"""
-        # 如果MSMP已启用且连接正常，使用MSMP
+        """获取当前可用的客户端(优先MSMP,其次RCON)"""
+        # 如果MSMP已可用且连接正常,使用MSMP
         if (self.config_manager.is_msmp_enabled() and 
             self.msmp_client and 
             self.msmp_client.is_connected()):
@@ -205,7 +211,7 @@ class CommandHandlers:
             client_type, client = self._get_active_client()
             
             if not client:
-                return "服务器连接未就绪（MSMP和RCON均未连接）"
+                return "服务器连接未就绪(MSMP和RCON均未连接)"
             
             # 获取玩家列表
             try:
@@ -298,15 +304,19 @@ class CommandHandlers:
             return self.qq_server.command_handler.get_help_message(user_id)
         return "帮助系统未初始化"
     
-    async def handle_stop(self, user_id: int, group_id: int, websocket, **kwargs) -> str:
-        """处理stop命令（管理员） - 支持MSMP和RCON"""
+    async def handle_stop(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理stop命令(管理员) - 支持MSMP和RCON"""
         try:
             client_type, client = self._get_active_client()
             
             if not client:
-                return "服务器连接未就绪，无法执行停止命令"
+                return "服务器连接未就绪,无法执行停止命令"
             
-            await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
+            # 发送执行中提示
+            if is_private:
+                await self.qq_server.send_private_message(websocket, user_id, "正在停止服务器...")
+            else:
+                await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
             
             if client_type == 'msmp':
                 # 检查服务器状态
@@ -336,8 +346,8 @@ class CommandHandlers:
             self.logger.error(f"执行stop命令失败: {e}", exc_info=True)
             return f"停止服务器失败: {e}"
     
-    async def handle_start(self, user_id: int, group_id: int, websocket, **kwargs) -> str:
-        """处理start命令（管理员）"""
+    async def handle_start(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理start命令(管理员)"""
         try:
             # 检查是否已有服务器进程在运行
             if self.qq_server.server_process and self.qq_server.server_process.poll() is None:
@@ -354,7 +364,11 @@ class CommandHandlers:
             if not os.path.exists(start_script):
                 return f"❌ 启动脚本不存在: {start_script}"
             
-            await self.qq_server.send_group_message(websocket, group_id, "正在启动服务器...")
+            # 发送执行中提示
+            if is_private:
+                await self.qq_server.send_private_message(websocket, user_id, "正在启动服务器...")
+            else:
+                await self.qq_server.send_group_message(websocket, group_id, "正在启动服务器...")
             
             # 调用qq_server的启动方法
             await self.qq_server._start_server_process(websocket, group_id)
@@ -366,7 +380,7 @@ class CommandHandlers:
             return f"启动服务器失败: {e}"
     
     async def handle_reload(self, user_id: int, **kwargs) -> str:
-        """处理reload命令（管理员）"""
+        """处理reload命令(管理员)"""
         try:
             self.config_manager.reload()
             return "配置已重新加载"

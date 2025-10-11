@@ -1,6 +1,6 @@
 import time
 import logging
-import os
+import os  # 添加这行
 from typing import Callable, Dict, List, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
@@ -170,10 +170,11 @@ class CommandHandler:
 class CommandHandlers:
     """命令处理器集合"""
     
-    def __init__(self, msmp_client, qq_server, config_manager, logger):
+    def __init__(self, msmp_client, rcon_client, qq_server, config_manager, logger):
         # 不直接保存 msmp_client，而是保存 qq_server
         # 然后通过 qq_server.msmp_client 动态获取
         self.qq_server = qq_server
+        self.rcon_client = rcon_client
         self.config_manager = config_manager
         self.logger = logger
     
@@ -182,21 +183,38 @@ class CommandHandlers:
         """动态获取 msmp_client"""
         return self.qq_server.msmp_client if self.qq_server else None
     
+    def _get_active_client(self):
+        """获取当前可用的客户端（优先MSMP，其次RCON）"""
+        # 如果MSMP已启用且连接正常，使用MSMP
+        if (self.config_manager.is_msmp_enabled() and 
+            self.msmp_client and 
+            self.msmp_client.is_connected()):
+            return 'msmp', self.msmp_client
+        
+        # 否则尝试使用RCON
+        if (self.config_manager.is_rcon_enabled() and 
+            self.rcon_client and 
+            self.rcon_client.is_connected()):
+            return 'rcon', self.rcon_client
+        
+        return None, None
+    
     async def handle_list(self, **kwargs) -> str:
-        """处理list命令"""
+        """处理list命令 - 支持MSMP和RCON自动切换"""
         try:
-            if not self.msmp_client:
-                return "MSMP客户端未初始化"
+            client_type, client = self._get_active_client()
             
-            # 检查连接状态
-            if not self.msmp_client.is_connected():
-                return "服务器连接未就绪，请先启动服务器"
+            if not client:
+                return "服务器连接未就绪（MSMP和RCON均未连接）"
             
-            # 尝试获取玩家列表
+            # 获取玩家列表
             try:
-                player_info = self.msmp_client.get_player_list_sync()
+                if client_type == 'msmp':
+                    player_info = client.get_player_list_sync()
+                else:  # rcon
+                    player_info = client.get_player_list()
             except Exception as e:
-                self.logger.error(f"获取玩家列表失败: {e}")
+                self.logger.error(f"获取玩家列表失败 ({client_type}): {e}")
                 return f"获取玩家列表失败: {str(e)}"
             
             lines = [f"在线人数: {player_info.current_players}/{player_info.max_players}"]
@@ -208,6 +226,9 @@ class CommandHandlers:
             else:
                 lines.append("\n暂无玩家在线")
             
+            # 添加连接方式标识
+            lines.append(f"\n[通过 {client_type.upper()} 查询]")
+            
             return "\n".join(lines)
             
         except Exception as e:
@@ -215,36 +236,54 @@ class CommandHandlers:
             return f"获取玩家列表失败: {e}"
     
     async def handle_status(self, **kwargs) -> str:
-        """处理status命令"""
+        """处理status命令 - 显示所有连接状态"""
         try:
             qq_status = "已连接" if self.qq_server.is_connected() else "未连接"
             
-            if not self.msmp_client:
-                msmp_status = "客户端未初始化"
-            elif not self.msmp_client.is_connected():
-                msmp_status = "未连接"
-            else:
-                try:
-                    status = self.msmp_client.get_server_status_sync()
-                    started = status.get('started', False)
-                    version = status.get('version', {})
-                    version_name = version.get('name', 'Unknown')
-                    
-                    player_info = self.msmp_client.get_player_list_sync()
-                    
-                    msmp_status = (
-                        f"运行中\n"
-                        f"版本: {version_name}\n"
-                        f"在线: {player_info.current_players}/{player_info.max_players}"
-                    )
-                except Exception as e:
-                    msmp_status = f"连接异常: {e}"
+            # MSMP状态
+            msmp_status = "未启用"
+            if self.config_manager.is_msmp_enabled():
+                if not self.msmp_client:
+                    msmp_status = "客户端未初始化"
+                elif not self.msmp_client.is_connected():
+                    msmp_status = "未连接"
+                else:
+                    try:
+                        status = self.msmp_client.get_server_status_sync()
+                        started = status.get('started', False)
+                        version = status.get('version', {})
+                        version_name = version.get('name', 'Unknown')
+                        
+                        player_info = self.msmp_client.get_player_list_sync()
+                        
+                        msmp_status = (
+                            f"运行中\n"
+                            f"版本: {version_name}\n"
+                            f"在线: {player_info.current_players}/{player_info.max_players}"
+                        )
+                    except Exception as e:
+                        msmp_status = f"连接异常: {e}"
+            
+            # RCON状态
+            rcon_status = "未启用"
+            if self.config_manager.is_rcon_enabled():
+                if not self.rcon_client:
+                    rcon_status = "客户端未初始化"
+                elif not self.rcon_client.is_connected():
+                    rcon_status = "未连接"
+                else:
+                    try:
+                        player_info = self.rcon_client.get_player_list()
+                        rcon_status = f"运行中\n在线: {player_info.current_players}/{player_info.max_players}"
+                    except Exception as e:
+                        rcon_status = f"连接异常: {e}"
             
             return (
                 "系统状态\n"
                 "━━━━━━━━━━━━━━\n"
                 f"QQ机器人: {qq_status}\n"
-                f"Minecraft服务器:\n{msmp_status}\n"
+                f"MSMP连接:\n{msmp_status}\n"
+                f"RCON连接:\n{rcon_status}\n"
                 "━━━━━━━━━━━━━━"
             )
             
@@ -260,31 +299,38 @@ class CommandHandlers:
         return "帮助系统未初始化"
     
     async def handle_stop(self, user_id: int, group_id: int, websocket, **kwargs) -> str:
-        """处理stop命令（管理员）"""
+        """处理stop命令（管理员） - 支持MSMP和RCON"""
         try:
-            if not self.msmp_client:
-                return "MSMP客户端未初始化"
+            client_type, client = self._get_active_client()
             
-            if not self.msmp_client.is_connected():
+            if not client:
                 return "服务器连接未就绪，无法执行停止命令"
-            
-            try:
-                status = self.msmp_client.get_server_status_sync()
-                if not status.get('started', False):
-                    return "服务器已经是停止状态"
-            except Exception as e:
-                self.logger.warning(f"获取服务器状态失败: {e}")
-                # 即使获取状态失败也尝试执行stop命令
             
             await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
             
-            result = self.msmp_client.execute_command_sync("server/stop")
+            if client_type == 'msmp':
+                # 检查服务器状态
+                try:
+                    status = client.get_server_status_sync()
+                    if not status.get('started', False):
+                        return "服务器已经是停止状态"
+                except Exception as e:
+                    self.logger.warning(f"获取服务器状态失败: {e}")
+                
+                result = client.execute_command_sync("server/stop")
+                
+                if 'result' in result:
+                    return None  # 不返回消息
+                else:
+                    error_msg = result.get('error', {}).get('message', '未知错误')
+                    return f"停止服务器失败: {error_msg}"
             
-            if 'result' in result:
-                return None  # 不返回消息
-            else:
-                error_msg = result.get('error', {}).get('message', '未知错误')
-                return f"停止服务器失败: {error_msg}"
+            else:  # rcon
+                success = client.stop_server()
+                if success:
+                    return None  # 不返回消息
+                else:
+                    return "停止服务器失败"
                 
         except Exception as e:
             self.logger.error(f"执行stop命令失败: {e}", exc_info=True)

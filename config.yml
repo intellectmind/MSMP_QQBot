@@ -2,12 +2,25 @@
 
 # Minecraft Server Management Protocol (MSMP) 配置
 msmp:
+  # 是否启用MSMP（推荐：功能最完整，需版本1.21.9+）
+  enabled: true
   # MSMP服务器地址
-  host: "localhost"
+  host: localhost
   # MSMP端口 (需要在服务端配置文件中设置 management-server-port)
   port: 21111
   # MSMP认证令牌 (需要在服务端配置文件中设置 management-server-secret)
-  password: "your_msmp_password_here"
+  password: your_msmp_password_here
+
+# RCON连接配置
+rcon:
+  # 是否启用RCON（备用方案，与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
+  enabled: false
+  # RCON服务器地址
+  host: localhost
+  # RCON端口
+  port: 25575
+  # RCON密码
+  password: your_rcon_password_here
 
 # WebSocket反向连接配置
 websocket:

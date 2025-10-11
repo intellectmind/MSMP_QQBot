@@ -7,6 +7,7 @@ import os
 from typing import List, Dict, Any, Optional
 import time
 from command_handler import CommandHandler, CommandHandlers
+from rcon_client import RCONClient
 
 class QQBotWebSocketServer:
     """
@@ -14,10 +15,11 @@ class QQBotWebSocketServer:
     支持OneBot 11协议
     """
     
-    def __init__(self, port: int, allowed_groups: List[int], msmp_client, logger: logging.Logger, access_token: str = "", config_manager=None):
+    def __init__(self, port: int, allowed_groups: List[int], msmp_client, logger: logging.Logger, access_token: str = "", config_manager=None, rcon_client=None):
         self.port = port
         self.allowed_groups = allowed_groups
         self.msmp_client = msmp_client
+        self.rcon_client = rcon_client
         self.logger = logger
         self.access_token = access_token
         self.config_manager = config_manager
@@ -38,6 +40,7 @@ class QQBotWebSocketServer:
             self.command_handler = CommandHandler(self.config_manager, self.logger)
             self.command_handlers = CommandHandlers(
                 self.msmp_client, 
+                self.rcon_client,
                 self, 
                 self.config_manager, 
                 self.logger
@@ -148,9 +151,12 @@ class QQBotWebSocketServer:
                 await self.send_group_message(websocket, group_id, "MSMP_QQBot 连接成功！")
                 
             # 检查MSMP连接状态并通知
-            if self.msmp_client and self.msmp_client.is_authenticated():
+            if self.config_manager.is_msmp_enabled() and self.msmp_client and self.msmp_client.is_authenticated():
                 for group_id in self.allowed_groups:
-                    await self.send_group_message(websocket, group_id, "已连接到Minecraft服务器")
+                    await self.send_group_message(websocket, group_id, "已连接到Minecraft服务器 (MSMP)")
+            elif self.config_manager.is_rcon_enabled() and self.rcon_client and self.rcon_client.is_connected():
+                for group_id in self.allowed_groups:
+                    await self.send_group_message(websocket, group_id, "已连接到Minecraft服务器 (RCON)")
             else:
                 for group_id in self.allowed_groups:
                     await self.send_group_message(websocket, group_id, 

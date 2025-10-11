@@ -6,6 +6,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from config_manager import ConfigManager, ConfigValidationError
 from msmp_client import MSMPClient, ServerEventListener
+from rcon_client import RCONClient
 from qq_bot_server import QQBotWebSocketServer
 
 class MsmpQQBot(ServerEventListener):
@@ -28,6 +29,7 @@ class MsmpQQBot(ServerEventListener):
         
         # 初始化组件
         self.msmp_client = None
+        self.rcon_client = None
         self.qq_server = None
         
         # 事件循环
@@ -73,39 +75,58 @@ class MsmpQQBot(ServerEventListener):
         try:
             # 先初始化QQ机器人WebSocket服务器
             ws_token = self.config_manager.get_websocket_token() if self.config_manager.is_websocket_auth_enabled() else ""
+            
+            # 初始化RCON客户端（如果启用）
+            if self.config_manager.is_rcon_enabled():
+                self.rcon_client = RCONClient(
+                    self.config_manager.get_rcon_host(),
+                    self.config_manager.get_rcon_port(),
+                    self.config_manager.get_rcon_password(),
+                    self.logger
+                )
+                self.logger.info("RCON客户端已初始化")
+            
             self.qq_server = QQBotWebSocketServer(
                 self.config_manager.get_ws_port(),
                 self.config_manager.get_qq_groups(),
                 None,  # 先不传递msmp_client
                 self.logger,
                 ws_token,
-                self.config_manager
+                self.config_manager,
+                self.rcon_client  # 传递rcon_client
             )
             
             # 启动QQ机器人WebSocket服务器
             await self.qq_server.start()
             self.logger.info("QQ机器人服务器已启动")
             
-            # 然后初始化MSMP客户端（但不立即连接）
-            self.msmp_client = MSMPClient(
-                self.config_manager.get_msmp_host(),
-                self.config_manager.get_msmp_port(),
-                self.config_manager.get_msmp_password(),
-                self.logger,
-                self.config_manager
-            )
+            # 然后初始化MSMP客户端（如果启用，但不立即连接）
+            if self.config_manager.is_msmp_enabled():
+                self.msmp_client = MSMPClient(
+                    self.config_manager.get_msmp_host(),
+                    self.config_manager.get_msmp_port(),
+                    self.config_manager.get_msmp_password(),
+                    self.logger,
+                    self.config_manager
+                )
+                
+                # 启动MSMP客户端后台循环
+                self.msmp_client.start_background_loop()
+                
+                # 设置MSMP事件监听器
+                self.msmp_client.set_event_listener(self)
+                
+                # 立即设置到QQ服务器，这样即使连接失败也能处理命令
+                self.qq_server.msmp_client = self.msmp_client
+                
+                # 延迟尝试连接MSMP服务器（非阻塞）
+                asyncio.create_task(self._delayed_msmp_connect())
+            else:
+                self.logger.info("MSMP未启用，跳过MSMP客户端初始化")
             
-            # 启动MSMP客户端后台循环
-            self.msmp_client.start_background_loop()
-            
-            # 设置MSMP事件监听器
-            self.msmp_client.set_event_listener(self)
-            
-            # 立即设置到QQ服务器，这样即使连接失败也能处理命令
-            self.qq_server.msmp_client = self.msmp_client
-            
-            # 延迟尝试连接MSMP服务器（非阻塞）
-            asyncio.create_task(self._delayed_msmp_connect())
+            # 尝试连接RCON（如果启用）
+            if self.rcon_client:
+                asyncio.create_task(self._try_rcon_connection())
             
             self.running = True
             self.logger.info("MSMP_QQBot 服务启动成功")
@@ -123,6 +144,36 @@ class MsmpQQBot(ServerEventListener):
         
         # 尝试连接MSMP服务器（非阻塞）
         asyncio.create_task(self._try_msmp_connection())
+    
+    async def _try_rcon_connection(self):
+        """尝试连接RCON服务器"""
+        await asyncio.sleep(3)
+        self.logger.info("准备连接RCON服务器...")
+        
+        retry_count = 0
+        max_retries = 3  # RCON只尝试3次
+        
+        while self.running and retry_count < max_retries:
+            try:
+                retry_count += 1
+                self.logger.info(f"正在尝试连接RCON服务器 {self.config_manager.get_rcon_host()}:{self.config_manager.get_rcon_port()} (第{retry_count}次)")
+                
+                if self.rcon_client.connect():
+                    self.logger.info("RCON服务器连接成功！")
+                    # 发送连接成功通知
+                    if self.config_manager.is_server_event_notify_enabled() and self.qq_server and self.qq_server.is_connected():
+                        await self.qq_server.broadcast_to_all_groups("RCON连接已建立")
+                    break
+                else:
+                    self.logger.warning("RCON服务器连接失败")
+                    
+            except Exception as e:
+                self.logger.warning(f"RCON服务器连接失败: {e}")
+            
+            if retry_count < max_retries:
+                delay = 10
+                self.logger.info(f"{delay}秒后尝试重新连接RCON服务器...")
+                await asyncio.sleep(delay)
 
     async def _try_msmp_connection(self):
         """尝试连接MSMP服务器（非阻塞）"""
@@ -132,26 +183,30 @@ class MsmpQQBot(ServerEventListener):
         while self.running and (max_retries is None or retry_count < max_retries):
             try:
                 # 检查是否已经连接（可能是服务器启动后连接的）
-                if self.msmp_client.is_authenticated():
+                if self.msmp_client and self.msmp_client.is_authenticated():
                     self.logger.info("MSMP已连接，跳过自动重连")
                     break
                 
                 retry_count += 1
                 self.logger.info(f"正在尝试连接MSMP服务器 {self.config_manager.get_msmp_host()}:{self.config_manager.get_msmp_port()} (第{retry_count}次)")
                 
-                self.msmp_client.connect_sync()
-                
-                # 等待连接稳定
-                await asyncio.sleep(2)
-                
-                if self.msmp_client.is_authenticated():
-                    self.logger.info("MSMP服务器连接成功！")
-                    # 发送连接成功通知
-                    if self.config_manager.is_server_event_notify_enabled() and self.qq_server and self.qq_server.is_connected():
-                        await self.qq_server.broadcast_to_all_groups("MSMP_QQBot 已连接到Minecraft服务器")
-                    break  # 连接成功，退出循环
+                if self.msmp_client:
+                    self.msmp_client.connect_sync()
+                    
+                    # 等待连接稳定
+                    await asyncio.sleep(2)
+                    
+                    if self.msmp_client.is_authenticated():
+                        self.logger.info("MSMP服务器连接成功！")
+                        # 发送连接成功通知
+                        if self.config_manager.is_server_event_notify_enabled() and self.qq_server and self.qq_server.is_connected():
+                            await self.qq_server.broadcast_to_all_groups("MSMP连接已建立")
+                        break  # 连接成功，退出循环
+                    else:
+                        self.logger.warning("MSMP服务器认证失败")
                 else:
-                    self.logger.warning("MSMP服务器认证失败")
+                    self.logger.error("MSMP客户端未初始化")
+                    break
                     
             except Exception as e:
                 self.logger.warning(f"MSMP服务器连接失败: {e}")
@@ -180,6 +235,10 @@ class MsmpQQBot(ServerEventListener):
             # 关闭MSMP连接
             if self.msmp_client:
                 self.msmp_client.close_sync()
+            
+            # 关闭RCON连接
+            if self.rcon_client:
+                self.rcon_client.close()
             
             self.logger.info("MSMP_QQBot 服务已停止")
             

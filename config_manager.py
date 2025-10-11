@@ -43,9 +43,16 @@ class ConfigManager:
         """获取默认配置"""
         return {
             'msmp': {
+                'enabled': True,
                 'host': 'localhost',
                 'port': 21111,
                 'password': 'your_msmp_password_here'
+            },
+            'rcon': {
+                'enabled': False,
+                'host': 'localhost',
+                'port': 25575,
+                'password': 'your_rcon_password_here'
             },
             'websocket': {
                 'port': 8080,
@@ -81,26 +88,51 @@ class ConfigManager:
         """验证配置文件"""
         errors = []
         
-        # 验证MSMP配置
-        if not self.get_msmp_host():
-            errors.append("MSMP host 未配置")
+        # 检查至少启用一种连接方式
+        msmp_enabled = self.is_msmp_enabled()
+        rcon_enabled = self.is_rcon_enabled()
         
-        msmp_port = self.get_msmp_port()
-        if not (1024 <= msmp_port <= 65535):
-            errors.append(f"MSMP端口 {msmp_port} 无效（应在1024-65535之间）")
+        if not msmp_enabled and not rcon_enabled:
+            errors.append("必须至少启用MSMP或RCON其中一种连接方式")
         
-        if not self.get_msmp_password():
-            errors.append("MSMP password 未配置")
-        elif self.get_msmp_password() == 'your_msmp_password_here':
-            errors.append("MSMP password 仍使用默认值，请修改为实际密码")
+        # 验证MSMP配置（如果启用）
+        if msmp_enabled:
+            if not self.get_msmp_host():
+                errors.append("MSMP host 未配置")
+            
+            msmp_port = self.get_msmp_port()
+            if not (1024 <= msmp_port <= 65535):
+                errors.append(f"MSMP端口 {msmp_port} 无效（应在1024-65535之间）")
+            
+            if not self.get_msmp_password():
+                errors.append("MSMP password 未配置")
+            elif self.get_msmp_password() == 'your_msmp_password_here':
+                errors.append("MSMP password 仍使用默认值，请修改为实际密码")
+        
+        # 验证RCON配置（如果启用）
+        if rcon_enabled:
+            if not self.get_rcon_host():
+                errors.append("RCON host 未配置")
+            
+            rcon_port = self.get_rcon_port()
+            if not (1024 <= rcon_port <= 65535):
+                errors.append(f"RCON端口 {rcon_port} 无效（应在1024-65535之间）")
+            
+            if not self.get_rcon_password():
+                errors.append("RCON password 未配置")
+            elif self.get_rcon_password() == 'your_rcon_password_here':
+                errors.append("RCON password 仍使用默认值，请修改为实际密码")
         
         # 验证WebSocket配置
         ws_port = self.get_ws_port()
         if not (1024 <= ws_port <= 65535):
             errors.append(f"WebSocket端口 {ws_port} 无效（应在1024-65535之间）")
         
-        if ws_port == msmp_port:
+        if msmp_enabled and ws_port == self.get_msmp_port():
             errors.append(f"WebSocket端口不能与MSMP端口相同 ({ws_port})")
+        
+        if rcon_enabled and ws_port == self.get_rcon_port():
+            errors.append(f"WebSocket端口不能与RCON端口相同 ({ws_port})")
         
         # 验证QQ配置
         if not self.get_qq_groups():
@@ -136,6 +168,9 @@ class ConfigManager:
             raise ConfigValidationError("配置验证失败:\n" + "\n".join(f"  - {e}" for e in errors))
     
     # MSMP配置
+    def is_msmp_enabled(self) -> bool:
+        return self.config.get('msmp', {}).get('enabled', True)
+    
     def get_msmp_host(self) -> str:
         return self.config.get('msmp', {}).get('host', 'localhost')
     
@@ -144,6 +179,19 @@ class ConfigManager:
     
     def get_msmp_password(self) -> str:
         return self.config.get('msmp', {}).get('password', '')
+    
+    # RCON配置
+    def is_rcon_enabled(self) -> bool:
+        return self.config.get('rcon', {}).get('enabled', False)
+    
+    def get_rcon_host(self) -> str:
+        return self.config.get('rcon', {}).get('host', 'localhost')
+    
+    def get_rcon_port(self) -> int:
+        return self.config.get('rcon', {}).get('port', 25575)
+    
+    def get_rcon_password(self) -> str:
+        return self.config.get('rcon', {}).get('password', '')
     
     # WebSocket配置
     def get_ws_port(self) -> int:
@@ -213,6 +261,8 @@ class ConfigManager:
         safe_config = self.config.copy()
         if 'msmp' in safe_config and 'password' in safe_config['msmp']:
             safe_config['msmp']['password'] = '***'
+        if 'rcon' in safe_config and 'password' in safe_config['rcon']:
+            safe_config['rcon']['password'] = '***'
         if 'websocket' in safe_config and 'token' in safe_config['websocket']:
             safe_config['websocket']['token'] = '***' if safe_config['websocket']['token'] else ''
         return safe_config

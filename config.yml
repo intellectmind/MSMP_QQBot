@@ -56,6 +56,11 @@ server:
   # 服务器启动超时时间（秒）
   startup_timeout: 300
 
+# 命令配置
+commands:
+  # TPS命令配置 - 群内使用tps命令时执行的指令，可根据服务器类型自定义
+  tps_command: "tps"
+
 # 通知配置
 notifications:
   # 是否发送服务器事件通知（启动/关闭）

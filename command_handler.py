@@ -153,7 +153,7 @@ class CommandHandler:
             
             lines.append("\n直接命令执行:")
             lines.append("• !<命令>")
-            lines.append("  管理员可使用 ! 前缀直接执行服务器命令，需启用RCON")
+            lines.append("  管理员可使用 ! 前缀直接执行服务器命令,需启用RCON")
             lines.append("  示例: !say Hello 或 !give @a diamond")
         
         lines.append("\n━━━━━━━━━━━━━━")
@@ -191,7 +191,7 @@ class CommandHandlers:
     
     def _get_active_client(self):
         """获取当前可用的客户端(优先MSMP,其次RCON)"""
-        # 如果MSMP已可用且连接正常,使用MSMP
+        # 如果MSMP已启用且连接正常,使用MSMP
         if (self.config_manager.is_msmp_enabled() and 
             self.msmp_client and 
             self.msmp_client.is_connected()):
@@ -241,6 +241,208 @@ class CommandHandlers:
             self.logger.error(f"执行list命令失败: {e}", exc_info=True)
             return f"获取玩家列表失败: {e}"
     
+    async def handle_tps(self, **kwargs) -> str:
+        """处理tps命令 - 仅通过RCON执行"""
+        try:
+            # TPS命令只能通过RCON执行
+            if not self.config_manager.is_rcon_enabled():
+                return "TPS命令需要启用RCON连接"
+            
+            if not self.rcon_client or not self.rcon_client.is_connected():
+                return "RCON连接未就绪"
+            
+            # 从配置获取TPS命令
+            tps_command = self.config_manager.get_tps_command()
+            
+            self.logger.info(f"执行TPS命令: {tps_command}")
+            
+            # 执行命令
+            result = self.rcon_client.execute_command(tps_command)
+            
+            if result:
+                # 清理RCON返回的颜色代码
+                cleaned = re.sub(r'§[0-9a-fk-or]', '', result).strip()
+                return f"服务器TPS信息:\n{cleaned}\n\n[通过 RCON 查询]"
+            else:
+                return "TPS命令执行成功,但无返回结果"
+                
+        except Exception as e:
+            self.logger.error(f"执行TPS命令失败: {e}", exc_info=True)
+            return f"获取TPS信息失败: {e}"
+    
+    async def handle_rules(self, **kwargs) -> str:
+        """处理rules命令 - 仅通过MSMP查询游戏规则"""
+        try:
+            # 游戏规则只能通过MSMP查询
+            if not self.config_manager.is_msmp_enabled():
+                return "规则查询需要启用MSMP连接"
+            
+            if not self.msmp_client or not self.msmp_client.is_connected():
+                return "MSMP连接未就绪"
+            
+            self.logger.info("查询服务器规则...")
+            
+            lines = ["服务器规则信息", "━━━━━━━━━━━━━━"]
+            
+            try:
+                # 1. 获取所有游戏规则 - 使用正确的方法名
+                gamerules_result = await self.msmp_client.get_game_rules()
+                
+                if 'result' in gamerules_result and isinstance(gamerules_result['result'], list):
+                    gamerules_list = gamerules_result['result']
+                    
+                    # 将规则列表转换为字典，方便查询
+                    gamerules_dict = {}
+                    for rule in gamerules_list:
+                        if isinstance(rule, dict) and 'key' in rule and 'value' in rule:
+                            gamerules_dict[rule['key']] = rule['value']
+                    
+                    # 常用游戏规则列表
+                    important_rules = {
+                        'keepInventory': '死亡不掉落',
+                        'doDaylightCycle': '时间循环',
+                        'doMobSpawning': '生物生成',
+                        'mobGriefing': '生物破坏',
+                        'doFireTick': '火焰蔓延',
+                        'pvp': 'PVP模式',
+                        'commandBlockOutput': '命令方块输出',
+                        'naturalRegeneration': '自然生命恢复',
+                        'doWeatherCycle': '天气循环',
+                        'announceAdvancements': '成就通告',
+                        'showDeathMessages': '显示死亡信息'
+                    }
+                    
+                    rules_found = False
+                    for rule_key, rule_name in important_rules.items():
+                        if rule_key in gamerules_dict:
+                            if not rules_found:
+                                lines.append("\n游戏规则:")
+                                rules_found = True
+                            
+                            value = gamerules_dict[rule_key]
+                            # 格式化布尔值
+                            if isinstance(value, bool):
+                                value_str = "启用" if value else "禁用"
+                            elif isinstance(value, str) and value.lower() in ['true', 'false']:
+                                value_str = "启用" if value.lower() == 'true' else "禁用"
+                            else:
+                                value_str = str(value)
+                            lines.append(f"• {rule_name}: {value_str}")
+                
+                # 2. 获取服务器设置
+                server_settings = {
+                    'difficulty': '难度',
+                    'view_distance': '视距',
+                    'simulation_distance': '模拟距离',
+                    'max_players': '最大玩家数',
+                    'game_mode': '默认游戏模式',
+                    'spawn_protection_radius': '出生点保护半径',
+                    'player_idle_timeout': '闲置超时时间'
+                }
+                
+                settings_found = False
+                for setting_key, setting_name in server_settings.items():
+                    try:
+                        # 使用正确的MSMP方法查询服务器设置
+                        result = await self.msmp_client.send_request(f"serversettings/{setting_key}")
+                        
+                        if 'result' in result:
+                            if not settings_found:
+                                lines.append("\n服务器设置:")
+                                settings_found = True
+                            
+                            value = result['result']
+                            
+                            if value is not None:
+                                # 特殊处理不同类型的值
+                                if setting_key == 'difficulty':
+                                    if isinstance(value, str):
+                                        difficulty_map = {
+                                            'peaceful': '和平',
+                                            'easy': '简单',
+                                            'normal': '普通',
+                                            'hard': '困难'
+                                        }
+                                        value_str = difficulty_map.get(value.lower(), value)
+                                    else:
+                                        difficulty_map = {0: '和平', 1: '简单', 2: '普通', 3: '困难'}
+                                        value_str = difficulty_map.get(value, str(value))
+                                elif setting_key == 'game_mode':
+                                    gamemode_map = {
+                                        'survival': '生存',
+                                        'creative': '创造',
+                                        'adventure': '冒险',
+                                        'spectator': '旁观'
+                                    }
+                                    value_str = gamemode_map.get(str(value).lower(), str(value))
+                                elif setting_key in ['view_distance', 'simulation_distance']:
+                                    value_str = f"{value} 区块"
+                                elif setting_key == 'spawn_protection_radius':
+                                    value_str = f"{value} 方块"
+                                elif setting_key == 'player_idle_timeout':
+                                    if value == 0:
+                                        value_str = "禁用"
+                                    else:
+                                        value_str = f"{value} 秒"
+                                else:
+                                    value_str = str(value)
+                                
+                                lines.append(f"• {setting_name}: {value_str}")
+                    except Exception as e:
+                        self.logger.debug(f"查询设置 {setting_key} 失败: {e}")
+                        continue
+                
+                # 3. 查询白名单状态
+                try:
+                    # 先检查白名单是否启用
+                    use_allowlist_result = await self.msmp_client.send_request("serversettings/use_allowlist")
+                    
+                    if 'result' in use_allowlist_result:
+                        if not settings_found:
+                            lines.append("\n服务器设置:")
+                            settings_found = True
+                        
+                        use_allowlist = use_allowlist_result['result']
+                        
+                        if use_allowlist:
+                            # 如果启用了白名单，获取白名单玩家列表
+                            try:
+                                allowlist_result = await self.msmp_client.send_request("allowlist")
+                                if 'result' in allowlist_result:
+                                    players = allowlist_result['result']
+                                    if isinstance(players, list):
+                                        lines.append(f"• 白名单: 启用 ({len(players)} 个玩家)")
+                                    else:
+                                        lines.append("• 白名单: 启用")
+                            except:
+                                lines.append("• 白名单: 启用")
+                        else:
+                            lines.append("• 白名单: 关闭")
+                except Exception as e:
+                    self.logger.debug(f"查询白名单状态失败: {e}")
+                
+                # 如果没有获取到任何信息
+                if len(lines) == 2:
+                    lines.append("\n未能获取到规则信息")
+                    lines.append("提示: MSMP连接正常但无法获取规则数据")
+                    lines.append("可能原因:")
+                    lines.append("1. MSMP插件版本过旧")
+                    lines.append("2. 服务器权限配置问题")
+                    lines.append("3. 查看服务器日志了解详情")
+                
+                lines.append("\n━━━━━━━━━━━━━━")
+                lines.append("[通过 MSMP 查询]")
+                
+                return "\n".join(lines)
+                
+            except Exception as e:
+                self.logger.error(f"获取规则信息失败: {e}", exc_info=True)
+                return f"获取规则信息失败: {str(e)}\n提示: 请检查MSMP插件版本和配置"
+                
+        except Exception as e:
+            self.logger.error(f"执行rules命令失败: {e}", exc_info=True)
+            return f"查询服务器规则失败: {e}"
+    
     async def handle_status(self, **kwargs) -> str:
         """处理status命令 - 显示所有连接状态"""
         try:
@@ -288,8 +490,8 @@ class CommandHandlers:
                 "系统状态\n"
                 "━━━━━━━━━━━━━━\n"
                 f"QQ机器人: {qq_status}\n"
-                f"MSMP连接:\n{msmp_status}\n"
-                f"RCON连接:\n{rcon_status}\n"
+                f"MSMP连接: {msmp_status}\n"
+                f"RCON连接: {rcon_status}\n"
                 "━━━━━━━━━━━━━━"
             )
             

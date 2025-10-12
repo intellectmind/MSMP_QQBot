@@ -314,7 +314,7 @@ class MSMPClient:
     async def get_game_rules(self) -> Dict[str, Any]:
         """获取游戏规则"""
         response = await self.send_request("gamerules")
-        return response.get('result', {})
+        return response
     
     async def attempt_reconnect(self):
         """尝试重新连接 - 使用锁防止并发重连"""

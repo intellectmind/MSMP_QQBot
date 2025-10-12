@@ -63,12 +63,15 @@ class ConfigManager:
                 'groups': [123456789],
                 'admins': [123456789],
                 'welcome_new_members': False,
-                'welcome_message': '欢迎新成员加入！输入 help 查看可用命令'
+                'welcome_message': '欢迎新成员加入!输入 help 查看可用命令'
             },
             'server': {
                 'start_script': '',
                 'working_directory': '',
                 'startup_timeout': 300
+            },
+            'commands': {
+                'tps_command': 'tps'
             },
             'notifications': {
                 'server_events': True,
@@ -96,38 +99,38 @@ class ConfigManager:
         if not msmp_enabled and not rcon_enabled:
             errors.append("必须至少启用MSMP或RCON其中一种连接方式")
         
-        # 验证MSMP配置（如果启用）
+        # 验证MSMP配置(如果启用)
         if msmp_enabled:
             if not self.get_msmp_host():
                 errors.append("MSMP host 未配置")
             
             msmp_port = self.get_msmp_port()
             if not (1024 <= msmp_port <= 65535):
-                errors.append(f"MSMP端口 {msmp_port} 无效（应在1024-65535之间）")
+                errors.append(f"MSMP端口 {msmp_port} 无效(应在1024-65535之间)")
             
             if not self.get_msmp_password():
                 errors.append("MSMP password 未配置")
             elif self.get_msmp_password() == 'your_msmp_password_here':
-                errors.append("MSMP password 仍使用默认值，请修改为实际密码")
+                errors.append("MSMP password 仍使用默认值,请修改为实际密码")
         
-        # 验证RCON配置（如果启用）
+        # 验证RCON配置(如果启用)
         if rcon_enabled:
             if not self.get_rcon_host():
                 errors.append("RCON host 未配置")
             
             rcon_port = self.get_rcon_port()
             if not (1024 <= rcon_port <= 65535):
-                errors.append(f"RCON端口 {rcon_port} 无效（应在1024-65535之间）")
+                errors.append(f"RCON端口 {rcon_port} 无效(应在1024-65535之间)")
             
             if not self.get_rcon_password():
                 errors.append("RCON password 未配置")
             elif self.get_rcon_password() == 'your_rcon_password_here':
-                errors.append("RCON password 仍使用默认值，请修改为实际密码")
+                errors.append("RCON password 仍使用默认值,请修改为实际密码")
         
         # 验证WebSocket配置
         ws_port = self.get_ws_port()
         if not (1024 <= ws_port <= 65535):
-            errors.append(f"WebSocket端口 {ws_port} 无效（应在1024-65535之间）")
+            errors.append(f"WebSocket端口 {ws_port} 无效(应在1024-65535之间)")
         
         if msmp_enabled and ws_port == self.get_msmp_port():
             errors.append(f"WebSocket端口不能与MSMP端口相同 ({ws_port})")
@@ -150,14 +153,14 @@ class ConfigManager:
             if not isinstance(admin_id, int) or admin_id <= 0:
                 errors.append(f"无效的管理员QQ号: {admin_id}")
         
-        # 验证服务器配置（如果配置了启动脚本）
+        # 验证服务器配置(如果配置了启动脚本)
         start_script = self.get_server_start_script()
         if start_script:
             if not os.path.exists(start_script):
-                # 只是警告，不算错误
+                # 只是警告,不算错误
                 pass
             elif not (start_script.endswith('.bat') or start_script.endswith('.sh')):
-                errors.append(f"服务器启动脚本格式不支持: {start_script}（仅支持.bat或.sh）")
+                errors.append(f"服务器启动脚本格式不支持: {start_script}(仅支持.bat或.sh)")
         
         return errors
     
@@ -218,7 +221,7 @@ class ConfigManager:
         return self.config.get('qq', {}).get('welcome_new_members', False)
     
     def get_welcome_message(self) -> str:
-        return self.config.get('qq', {}).get('welcome_message', '欢迎新成员加入！输入 help 查看可用命令')
+        return self.config.get('qq', {}).get('welcome_message', '欢迎新成员加入!输入 help 查看可用命令')
     
     def is_log_messages_enabled(self) -> bool:
         return self.config.get('notifications', {}).get('log_messages', False)
@@ -232,6 +235,11 @@ class ConfigManager:
     
     def get_server_startup_timeout(self) -> int:
         return self.config.get('server', {}).get('startup_timeout', 300)
+    
+    # 命令配置 (新增)
+    def get_tps_command(self) -> str:
+        """获取TPS命令配置"""
+        return self.config.get('commands', {}).get('tps_command', 'tps')
     
     # 通知配置
     def is_server_event_notify_enabled(self) -> bool:
@@ -258,7 +266,7 @@ class ConfigManager:
         return self.config.get('debug', False)
     
     def to_dict(self) -> Dict:
-        """获取配置字典（隐藏敏感信息）"""
+        """获取配置字典(隐藏敏感信息)"""
         safe_config = self.config.copy()
         if 'msmp' in safe_config and 'password' in safe_config['msmp']:
             safe_config['msmp']['password'] = '***'

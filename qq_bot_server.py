@@ -71,6 +71,22 @@ class QQBotWebSocketServer:
         )
         
         self.command_handler.register_command(
+            names=['tps', '/tps', '服务器tps'],
+            handler=self.command_handlers.handle_tps,
+            description='查看服务器TPS(每秒刻数)性能',
+            usage='tps',
+            cooldown=5
+        )
+        
+        self.command_handler.register_command(
+            names=['rules', '规则', '/rules', '游戏规则', '服务器规则'],
+            handler=self.command_handlers.handle_rules,
+            description='查看服务器游戏规则和设置',
+            usage='rules',
+            cooldown=5
+        )
+        
+        self.command_handler.register_command(
             names=['status', '状态', '/status', '状态'],
             handler=self.command_handlers.handle_status,
             description='查看服务器状态',

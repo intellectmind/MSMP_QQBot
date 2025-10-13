@@ -118,7 +118,15 @@ server:
 # 命令配置
 commands:
   # TPS命令配置 - 群内使用tps命令时执行的指令，可根据服务器类型自定义
-  tps_command: "tps"
+  tps_command: tps
+
+  # 基础命令开关配置，管理员不受此限制,始终可以使用所有命令
+  enabled_commands:
+    list: true    # 玩家列表命令
+    tps: true     # TPS查询命令
+    rules: true   # 规则查询命令
+    status: true  # 状态查询命令
+    help: true    # 帮助命令
 
 # 通知配置
 notifications:

@@ -2,6 +2,7 @@ import time
 import logging
 import os
 import re
+import asyncio  # 新增: 用于超时保护
 from typing import Callable, Dict, List, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
@@ -15,6 +16,7 @@ class Command:
     description: str = ""
     usage: str = ""
     cooldown: int = 0
+    command_key: str = ""
 
 class RateLimiter:
     """命令速率限制器"""
@@ -58,7 +60,8 @@ class CommandHandler:
                         admin_only: bool = False,
                         description: str = "",
                         usage: str = "",
-                        cooldown: int = 0):
+                        cooldown: int = 0,
+                        command_key: str = ""):
         """注册命令"""
         command = Command(
             names=names,
@@ -66,7 +69,8 @@ class CommandHandler:
             admin_only=admin_only,
             description=description,
             usage=usage,
-            cooldown=cooldown
+            cooldown=cooldown,
+            command_key=command_key
         )
         
         for name in names:
@@ -88,8 +92,14 @@ class CommandHandler:
         if not command:
             return None
         
+        # 检查命令是否启用(管理员不受限制)
+        is_admin = self.config_manager.is_admin(user_id)
+        if not is_admin and command.command_key:
+            if not self.config_manager.is_command_enabled(command.command_key):
+                return None  # 命令被禁用,静默返回
+        
         # 检查管理员权限
-        if command.admin_only and not self.config_manager.is_admin(user_id):
+        if command.admin_only and not is_admin:
             return "权限不足:此命令仅限管理员使用"
         
         # 检查冷却时间
@@ -104,13 +114,26 @@ class CommandHandler:
         
         # 执行命令
         try:
-            result = await command.handler(
-                user_id=user_id,
-                group_id=group_id,
-                command_text=command_text,
-                **kwargs
+            # 根据命令类型设置不同的超时时间
+            if command.admin_only and command.names[0] in ['start', 'stop', 'log']:
+                timeout = 60.0  # 管理命令给更长时间
+            else:
+                timeout = 30.0  # 普通命令30秒
+            
+            result = await asyncio.wait_for(
+                command.handler(
+                    user_id=user_id,
+                    group_id=group_id,
+                    command_text=command_text,
+                    **kwargs
+                ),
+                timeout=timeout
             )
             return result
+            
+        except asyncio.TimeoutError:
+            self.logger.error(f"命令 {command.names[0]} 执行超时 ({timeout}秒)")
+            return f"命令执行超时,请稍后重试或联系管理员"
         except Exception as e:
             self.logger.error(f"执行命令 {command.names[0]} 时出错: {e}", exc_info=True)
             return f"命令执行失败: {str(e)}"
@@ -126,6 +149,11 @@ class CommandHandler:
         for name, command in self.commands.items():
             if command.names[0] not in seen_commands:
                 seen_commands.add(command.names[0])
+                
+                # 对于普通用户,检查命令是否启用
+                if not is_admin and command.command_key:
+                    if not self.config_manager.is_command_enabled(command.command_key):
+                        continue  # 跳过被禁用的命令
                 
                 if command.admin_only:
                     if is_admin:
@@ -158,6 +186,17 @@ class CommandHandler:
         
         lines.append("\n━━━━━━━━━━━━━━")
         lines.append("提示: 直接输入命令,无需斜杠")
+        
+        # 如果是管理员,显示禁用命令提示
+        if is_admin:
+            disabled_commands = []
+            for cmd_key, enabled in self.config_manager.get_enabled_commands().items():
+                if not enabled:
+                    disabled_commands.append(cmd_key)
+            
+            if disabled_commands:
+                lines.append(f"\n已禁用命令: {', '.join(disabled_commands)}")
+                lines.append("(管理员仍可使用)")
         
         return "\n".join(lines)
     

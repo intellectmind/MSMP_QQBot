@@ -29,16 +29,16 @@ class QQBotWebSocketServer:
         self.current_connection = None
         self.server = None
         self.connected_clients = set()
-        self.server_process = None  # 存储服务器进程
+        self.server_process = None
         
-        # 添加服务器日志存储
+        # 服务器日志存储
         self.server_logs = []
-        self.max_log_lines = 100  # 最多存储100条日志
+        self.max_log_lines = 100
         
-        # 添加日志文件相关属性
+        # 日志文件相关
         self.server_log_file = None
         self.log_file_path = "mc_server.log"
-        self.max_log_file_size = 10 * 1024 * 1024  # 10MB
+        self.max_log_file_size = 10 * 1024 * 1024
         self.backup_count = 5
 
         # 初始化命令系统
@@ -67,7 +67,8 @@ class QQBotWebSocketServer:
             handler=self.command_handlers.handle_list,
             description='查看在线玩家列表',
             usage='list',
-            cooldown=5
+            cooldown=5,
+            command_key='list'
         )
         
         self.command_handler.register_command(
@@ -75,7 +76,8 @@ class QQBotWebSocketServer:
             handler=self.command_handlers.handle_tps,
             description='查看服务器TPS(每秒刻数)性能',
             usage='tps',
-            cooldown=5
+            cooldown=5,
+            command_key='tps'
         )
         
         self.command_handler.register_command(
@@ -83,27 +85,30 @@ class QQBotWebSocketServer:
             handler=self.command_handlers.handle_rules,
             description='查看服务器游戏规则和设置',
             usage='rules',
-            cooldown=5
+            cooldown=5,
+            command_key='rules'
         )
         
         self.command_handler.register_command(
-            names=['status', '状态', '/status', '状态'],
+            names=['status', '状态', '/status'],
             handler=self.command_handlers.handle_status,
             description='查看服务器状态',
             usage='status',
-            cooldown=5
+            cooldown=5,
+            command_key='status'
         )
         
         self.command_handler.register_command(
-            names=['help', '帮助', '/help', '帮助'],
+            names=['help', '帮助', '/help'],
             handler=self.command_handlers.handle_help,
             description='显示帮助信息',
-            usage='help'
+            usage='help',
+            command_key='help'
         )
         
         # 管理员命令
         self.command_handler.register_command(
-            names=['stop', '停止', '关服', '/stop', '停止', '关服'],
+            names=['stop', '停止', '关服', '/stop'],
             handler=self.command_handlers.handle_stop,
             admin_only=True,
             description='停止Minecraft服务器',
@@ -112,7 +117,7 @@ class QQBotWebSocketServer:
         )
         
         self.command_handler.register_command(
-            names=['start', '启动', '开服', '/start', '启动', '开服'],
+            names=['start', '启动', '开服', '/start'],
             handler=self.command_handlers.handle_start,
             admin_only=True,
             description='启动Minecraft服务器',
@@ -121,7 +126,7 @@ class QQBotWebSocketServer:
         )
         
         self.command_handler.register_command(
-            names=['reload', '重载', '/reload', '重载'],
+            names=['reload', '重载', '/reload'],
             handler=self.command_handlers.handle_reload,
             admin_only=True,
             description='重新加载配置文件',
@@ -163,7 +168,7 @@ class QQBotWebSocketServer:
             self.logger.info("WebSocket服务器已停止")
     
     async def _handle_connection(self, websocket, path):
-        """处理客户端连接"""
+        """处理客户端连接 - 修复 #3: 资源泄漏问题"""
         client_ip = websocket.remote_address[0]
         
         # 检查鉴权令牌
@@ -176,40 +181,45 @@ class QQBotWebSocketServer:
                 return
         
         self.logger.info(f"QQ机器人已连接: {client_ip}")
-        self.current_connection = websocket
-        self.connected_clients.add(websocket)
         
-        # 发送连接成功响应
-        await self._send_meta_event(websocket, "connect")
-        
-        # 发送连接成功通知到所有群
+        # 使用 try-finally 确保资源清理
         try:
-            for group_id in self.allowed_groups:
-                await self.send_group_message(websocket, group_id, "MSMP_QQBot 连接成功!")
+            self.current_connection = websocket
+            self.connected_clients.add(websocket)
+            
+            # 发送连接成功响应
+            await self._send_meta_event(websocket, "connect")
+            
+            # 发送连接成功通知到所有群
+            try:
+                for group_id in self.allowed_groups:
+                    await self.send_group_message(websocket, group_id, "MSMP_QQBot 连接成功!")
+                    
+                # 检查MSMP连接状态并通知
+                if self.config_manager.is_msmp_enabled() and self.msmp_client and self.msmp_client.is_authenticated():
+                    for group_id in self.allowed_groups:
+                        await self.send_group_message(websocket, group_id, "已连接到Minecraft服务器 (MSMP)")
+                elif self.config_manager.is_rcon_enabled() and self.rcon_client and self.rcon_client.is_connected():
+                    for group_id in self.allowed_groups:
+                        await self.send_group_message(websocket, group_id, "已连接到Minecraft服务器 (RCON)")
+                else:
+                    for group_id in self.allowed_groups:
+                        await self.send_group_message(websocket, group_id, 
+                            "Minecraft服务器未连接,管理员可使用 start 命令启动服务器")
+            except Exception as e:
+                self.logger.error(f"发送连接通知失败: {e}")
+            
+            # 消息处理循环
+            try:
+                async for message in websocket:
+                    await self._handle_message(websocket, message)
+            except websockets.exceptions.ConnectionClosed:
+                self.logger.info(f"QQ机器人已断开连接: {client_ip}")
+            except Exception as e:
+                self.logger.error(f"连接处理异常: {e}", exc_info=True)
                 
-            # 检查MSMP连接状态并通知
-            if self.config_manager.is_msmp_enabled() and self.msmp_client and self.msmp_client.is_authenticated():
-                for group_id in self.allowed_groups:
-                    await self.send_group_message(websocket, group_id, "已连接到Minecraft服务器 (MSMP)")
-            elif self.config_manager.is_rcon_enabled() and self.rcon_client and self.rcon_client.is_connected():
-                for group_id in self.allowed_groups:
-                    await self.send_group_message(websocket, group_id, "已连接到Minecraft服务器 (RCON)")
-            else:
-                for group_id in self.allowed_groups:
-                    await self.send_group_message(websocket, group_id, 
-                        "Minecraft服务器未连接,管理员可使用 start 命令启动服务器")
-        except Exception as e:
-            self.logger.error(f"发送连接通知失败: {e}")
-        
-        try:
-            async for message in websocket:
-                await self._handle_message(websocket, message)
-                
-        except websockets.exceptions.ConnectionClosed:
-            self.logger.info(f"QQ机器人已断开连接: {client_ip}")
-        except Exception as e:
-            self.logger.error(f"连接处理异常: {e}", exc_info=True)
         finally:
+            # 确保资源清理 - 修复 #3
             self.connected_clients.discard(websocket)
             if self.current_connection == websocket:
                 self.current_connection = None
@@ -218,7 +228,9 @@ class QQBotWebSocketServer:
             try:
                 await self._send_meta_event(websocket, "disconnect")
             except:
-                pass
+                pass  # 忽略发送失败
+            
+            self.logger.debug(f"已清理客户端资源: {client_ip}")
     
     async def _handle_message(self, websocket, message: str):
         """处理接收到的消息"""
@@ -297,42 +309,55 @@ class QQBotWebSocketServer:
             
             # 检查是否是管理员直接执行服务器命令 (以!开头)
             if raw_message.startswith('!'):
-                # 检查是否是管理员
                 if not self.config_manager.is_admin(user_id):
-                    await self.send_group_message(websocket, group_id, "权限不足:此功能仅限管理员使用")
                     return
                 
-                # 提取服务器命令 (去掉开头的!)
                 server_command = raw_message[1:].strip()
-                
                 if not server_command:
                     await self.send_group_message(websocket, group_id, "命令不能为空")
                     return
                 
-                # 执行服务器命令
-                result = await self._execute_server_command(server_command)
-                
-                if result:
-                    await self.send_group_message(websocket, group_id, f"命令执行结果:\n{result}")
-                else:
-                    await self.send_group_message(websocket, group_id, "命令已发送,但无返回结果")
+                # 添加超时保护
+                try:
+                    result = await asyncio.wait_for(
+                        self._execute_server_command(server_command),
+                        timeout=30.0
+                    )
+                    
+                    if result:
+                        await self.send_group_message(websocket, group_id, f"命令执行结果:\n{result}")
+                    else:
+                        await self.send_group_message(websocket, group_id, "命令已发送,但无返回结果")
+                        
+                except asyncio.TimeoutError:
+                    await self.send_group_message(websocket, group_id, "命令执行超时(30秒),请检查服务器状态")
+                    self.logger.warning(f"服务器命令执行超时: {server_command}")
+                except Exception as e:
+                    await self.send_group_message(websocket, group_id, f"命令执行失败: {str(e)}")
+                    self.logger.error(f"执行服务器命令异常: {e}", exc_info=True)
                 
                 return
             
             # 使用命令处理器处理Bot命令
             if self.command_handler:
                 try:
-                    result = await self.command_handler.handle_command(
-                        command_text=raw_message,
-                        user_id=user_id,
-                        group_id=group_id,
-                        websocket=websocket,
-                        msmp_client=self.msmp_client
+                    result = await asyncio.wait_for(
+                        self.command_handler.handle_command(
+                            command_text=raw_message,
+                            user_id=user_id,
+                            group_id=group_id,
+                            websocket=websocket,
+                            msmp_client=self.msmp_client
+                        ),
+                        timeout=30.0
                     )
                     
                     if result:
                         await self.send_group_message(websocket, group_id, result)
                         
+                except asyncio.TimeoutError:
+                    await self.send_group_message(websocket, group_id, "命令执行超时,请稍后重试")
+                    self.logger.warning(f"命令执行超时: {raw_message}")
                 except Exception as e:
                     self.logger.error(f"命令处理失败: {e}", exc_info=True)
                     await self.send_group_message(websocket, group_id, f"命令执行出错: {str(e)}")
@@ -350,46 +375,58 @@ class QQBotWebSocketServer:
             
             # 检查是否是直接执行服务器命令 (以!开头)
             if raw_message.startswith('!'):
-                # 提取服务器命令 (去掉开头的!)
                 server_command = raw_message[1:].strip()
-                
                 if not server_command:
                     await self.send_private_message(websocket, user_id, "命令不能为空")
                     return
                 
-                # 执行服务器命令
-                result = await self._execute_server_command(server_command)
-                
-                if result:
-                    await self.send_private_message(websocket, user_id, f"命令执行结果:\n{result}")
-                else:
-                    await self.send_private_message(websocket, user_id, "命令已发送,但无返回结果")
+                # 添加超时保护
+                try:
+                    result = await asyncio.wait_for(
+                        self._execute_server_command(server_command),
+                        timeout=30.0
+                    )
+                    
+                    if result:
+                        await self.send_private_message(websocket, user_id, f"命令执行结果:\n{result}")
+                    else:
+                        await self.send_private_message(websocket, user_id, "命令已发送,但无返回结果")
+                        
+                except asyncio.TimeoutError:
+                    await self.send_private_message(websocket, user_id, "命令执行超时(30秒),请检查服务器状态")
+                    self.logger.warning(f"服务器命令执行超时: {server_command}")
+                except Exception as e:
+                    await self.send_private_message(websocket, user_id, f"命令执行失败: {str(e)}")
+                    self.logger.error(f"执行服务器命令异常: {e}", exc_info=True)
                 
                 return
             
             # 使用命令处理器处理Bot命令
             if self.command_handler:
                 try:
-                    # 私聊时group_id设为0
-                    result = await self.command_handler.handle_command(
-                        command_text=raw_message,
-                        user_id=user_id,
-                        group_id=0,
-                        websocket=websocket,
-                        msmp_client=self.msmp_client,
-                        is_private=True  # 标记为私聊
+                    result = await asyncio.wait_for(
+                        self.command_handler.handle_command(
+                            command_text=raw_message,
+                            user_id=user_id,
+                            group_id=0,
+                            websocket=websocket,
+                            msmp_client=self.msmp_client,
+                            is_private=True
+                        ),
+                        timeout=30.0
                     )
                     
-                    if result:
+                    # 修复：正确处理返回值为 None 的情况
+                    if result is not None:
                         await self.send_private_message(websocket, user_id, result)
                     else:
-                        # 如果没有匹配的命令,给个友好提示
-                        await self.send_private_message(
-                            websocket, 
-                            user_id, 
-                            f"未知命令: {raw_message}\n发送 'help' 查看可用命令"
-                        )
+                        # 对于返回 None 的命令（如 start/stop），不发送"未知命令"提示
+                        # 因为这些命令已经在执行过程中发送了状态消息
+                        pass
                         
+                except asyncio.TimeoutError:
+                    await self.send_private_message(websocket, user_id, "命令执行超时,请稍后重试")
+                    self.logger.warning(f"命令执行超时: {raw_message}")
                 except Exception as e:
                     self.logger.error(f"命令处理失败: {e}", exc_info=True)
                     await self.send_private_message(websocket, user_id, f"命令执行出错: {str(e)}")
@@ -433,7 +470,7 @@ class QQBotWebSocketServer:
                         self.logger.error(f"MSMP执行管理命令失败: {e}")
                         return f"MSMP执行失败: {str(e)}"
                 else:
-                    return "MSMP不支持执行游戏命令，请使用RCON"
+                    return "MSMP不支持执行游戏命令,请使用RCON"
             
             else:
                 return "服务器连接未就绪"
@@ -766,7 +803,7 @@ class QQBotWebSocketServer:
     def _is_server_ready(self, line: str) -> bool:
         """检查服务器是否启动完成"""
         line_lower = line.lower()
-        ready_keywords = ['done', 'server started']
+        ready_keywords = ['done (', 'server started']
         return any(keyword in line_lower for keyword in ready_keywords)
 
     async def _send_server_started_notification(self):

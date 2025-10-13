@@ -71,7 +71,14 @@ class ConfigManager:
                 'startup_timeout': 300
             },
             'commands': {
-                'tps_command': 'tps'
+                'tps_command': 'tps',
+                'enabled_commands': {
+                    'list': True,
+                    'tps': True,
+                    'rules': True,
+                    'status': True,
+                    'help': True
+                }
             },
             'notifications': {
                 'server_events': True,
@@ -236,10 +243,26 @@ class ConfigManager:
     def get_server_startup_timeout(self) -> int:
         return self.config.get('server', {}).get('startup_timeout', 300)
     
-    # 命令配置 (新增)
+    # 命令配置
     def get_tps_command(self) -> str:
         """获取TPS命令配置"""
         return self.config.get('commands', {}).get('tps_command', 'tps')
+    
+    def is_command_enabled(self, command_name: str) -> bool:
+        """检查命令是否启用"""
+        enabled_commands = self.config.get('commands', {}).get('enabled_commands', {})
+        # 默认所有命令都启用
+        return enabled_commands.get(command_name, True)
+    
+    def get_enabled_commands(self) -> Dict[str, bool]:
+        """获取所有命令的启用状态"""
+        return self.config.get('commands', {}).get('enabled_commands', {
+            'list': True,
+            'tps': True,
+            'rules': True,
+            'status': True,
+            'help': True
+        })
     
     # 通知配置
     def is_server_event_notify_enabled(self) -> bool:

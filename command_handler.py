@@ -2,7 +2,7 @@ import time
 import logging
 import os
 import re
-import asyncio  # 新增: 用于超时保护
+import asyncio
 from typing import Callable, Dict, List, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
@@ -115,7 +115,7 @@ class CommandHandler:
         # 执行命令
         try:
             # 根据命令类型设置不同的超时时间
-            if command.admin_only and command.names[0] in ['start', 'stop', 'log']:
+            if command.admin_only and command.names[0] in ['start', 'stop', 'log', 'reconnect']:
                 timeout = 60.0  # 管理命令给更长时间
             else:
                 timeout = 30.0  # 普通命令30秒
@@ -614,6 +614,20 @@ class CommandHandlers:
             # 调用qq_server的启动方法
             await self.qq_server._start_server_process(websocket, group_id)
             
+            # 添加启动后的连接提示
+            connection_info = []
+            if self.config_manager.is_msmp_enabled():
+                connection_info.append("MSMP管理协议")
+            if self.config_manager.is_rcon_enabled():
+                connection_info.append("RCON远程控制")
+            
+            if connection_info:
+                info_msg = f"服务器启动后，将自动尝试连接: {', '.join(connection_info)}"
+                if is_private:
+                    await self.qq_server.send_private_message(websocket, user_id, info_msg)
+                else:
+                    await self.qq_server.send_group_message(websocket, group_id, info_msg)
+            
             return None  # 不返回消息
             
         except Exception as e:
@@ -674,10 +688,167 @@ class CommandHandlers:
             self.logger.error(f"执行log命令失败: {e}", exc_info=True)
             return f"获取日志失败: {e}"
 
+    async def handle_reconnect(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理reconnect命令 - 手动重连服务"""
+        try:
+            # 发送执行中提示
+            if is_private:
+                await self.qq_server.send_private_message(websocket, user_id, "正在尝试重新连接服务...")
+            else:
+                await self.qq_server.send_group_message(websocket, group_id, "正在尝试重新连接服务...")
+            
+            results = []
+            
+            # 尝试重连MSMP
+            if self.config_manager.is_msmp_enabled() and self.msmp_client:
+                try:
+                    if self.msmp_client.is_connected():
+                        results.append("MSMP: 已连接 (无需重连)")
+                    else:
+                        self.logger.info("手动重连MSMP服务器...")
+                        self.msmp_client.connect_sync()
+                        await asyncio.sleep(3)  # 等待连接稳定
+                        
+                        if self.msmp_client.is_connected():
+                            results.append("MSMP: 连接成功 ✓")
+                            self.logger.info("MSMP手动重连成功")
+                        else:
+                            results.append("MSMP: 连接失败 ✗")
+                            self.logger.warning("MSMP手动重连失败")
+                except Exception as e:
+                    results.append(f"MSMP: 连接异常 - {str(e)}")
+                    self.logger.error(f"MSMP手动重连异常: {e}")
+            
+            # 尝试重连RCON
+            if self.config_manager.is_rcon_enabled() and self.rcon_client:
+                try:
+                    if self.rcon_client.is_connected():
+                        results.append("RCON: 已连接 (无需重连)")
+                    else:
+                        self.logger.info("手动重连RCON服务器...")
+                        success = self.rcon_client.connect()
+                        
+                        if success:
+                            results.append("RCON: 连接成功 ✓")
+                            self.logger.info("RCON手动重连成功")
+                        else:
+                            results.append("RCON: 连接失败 ✗")
+                            self.logger.warning("RCON手动重连失败")
+                except Exception as e:
+                    results.append(f"RCON: 连接异常 - {str(e)}")
+                    self.logger.error(f"RCON手动重连异常: {e}")
+            
+            if not results:
+                return "没有启用任何服务连接，无需重连"
+            
+            # 构建结果消息
+            message_lines = ["重连结果:", "━━━━━━━━━━━━━━"]
+            message_lines.extend(results)
+            message_lines.append("━━━━━━━━━━━━━━")
+            
+            return "\n".join(message_lines)
+            
+        except Exception as e:
+            self.logger.error(f"执行reconnect命令失败: {e}", exc_info=True)
+            return f"重连服务失败: {e}"
+
+    async def handle_reconnect_msmp(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理reconnect_msmp命令 - 手动重连MSMP"""
+        try:
+            if not self.config_manager.is_msmp_enabled():
+                return "MSMP未启用，无法重连"
+            
+            if not self.msmp_client:
+                return "MSMP客户端未初始化"
+            
+            # 发送执行中提示
+            if is_private:
+                await self.qq_server.send_private_message(websocket, user_id, "正在重连MSMP服务器...")
+            else:
+                await self.qq_server.send_group_message(websocket, group_id, "正在重连MSMP服务器...")
+            
+            # 检查当前状态
+            current_status = "已连接" if self.msmp_client.is_connected() else "未连接"
+            
+            try:
+                # 先关闭现有连接
+                if self.msmp_client.is_connected():
+                    self.msmp_client.close_sync()
+                    await asyncio.sleep(1)  # 等待关闭完成
+                
+                # 重新连接
+                self.logger.info("手动重连MSMP服务器...")
+                self.msmp_client.connect_sync()
+                await asyncio.sleep(3)  # 等待连接稳定
+                
+                if self.msmp_client.is_connected():
+                    result = f"MSMP重连成功 ✓\n原状态: {current_status}\n现状态: 已连接"
+                    self.logger.info("MSMP手动重连成功")
+                else:
+                    result = f"MSMP重连失败 ✗\n原状态: {current_status}\n现状态: 未连接"
+                    self.logger.warning("MSMP手动重连失败")
+                
+                return result
+                
+            except Exception as e:
+                error_msg = f"MSMP重连异常: {str(e)}"
+                self.logger.error(f"MSMP手动重连异常: {e}")
+                return error_msg
+            
+        except Exception as e:
+            self.logger.error(f"执行reconnect_msmp命令失败: {e}", exc_info=True)
+            return f"重连MSMP失败: {e}"
+
+    async def handle_reconnect_rcon(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理reconnect_rcon命令 - 手动重连RCON"""
+        try:
+            if not self.config_manager.is_rcon_enabled():
+                return "RCON未启用，无法重连"
+            
+            if not self.rcon_client:
+                return "RCON客户端未初始化"
+            
+            # 发送执行中提示
+            if is_private:
+                await self.qq_server.send_private_message(websocket, user_id, "正在重连RCON服务器...")
+            else:
+                await self.qq_server.send_group_message(websocket, group_id, "正在重连RCON服务器...")
+            
+            # 检查当前状态
+            current_status = "已连接" if self.rcon_client.is_connected() else "未连接"
+            
+            try:
+                # 先关闭现有连接
+                if self.rcon_client.is_connected():
+                    self.rcon_client.close()
+                    await asyncio.sleep(1)  # 等待关闭完成
+                
+                # 重新连接
+                self.logger.info("手动重连RCON服务器...")
+                success = self.rcon_client.connect()
+                
+                if success:
+                    result = f"RCON重连成功 ✓\n原状态: {current_status}\n现状态: 已连接"
+                    self.logger.info("RCON手动重连成功")
+                else:
+                    result = f"RCON重连失败 ✗\n原状态: {current_status}\n现状态: 未连接"
+                    self.logger.warning("RCON手动重连失败")
+                
+                return result
+                
+            except Exception as e:
+                error_msg = f"RCON重连异常: {str(e)}"
+                self.logger.error(f"RCON手动重连异常: {e}")
+                return error_msg
+            
+        except Exception as e:
+            self.logger.error(f"执行reconnect_rcon命令失败: {e}", exc_info=True)
+            return f"重连RCON失败: {e}"
+
     def _read_recent_logs_from_file(self, lines: int = 10) -> List[str]:
         """从日志文件读取最近的日志"""
         try:
-            log_file_path = "mc_server.log"
+            log_file_path = "logs/mc_server.log"  # 更新为新的日志路径
             if not os.path.exists(log_file_path):
                 return []
             

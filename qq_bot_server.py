@@ -147,6 +147,34 @@ class QQBotWebSocketServer:
             usage='log',
             cooldown=10
         )
+        
+        # 新增的重连命令
+        self.command_handler.register_command(
+            names=['reconnect', '重连', '/reconnect'],
+            handler=self.command_handlers.handle_reconnect,
+            admin_only=True,
+            description='重新连接所有服务(MSMP和RCON)',
+            usage='reconnect',
+            cooldown=10
+        )
+        
+        self.command_handler.register_command(
+            names=['reconnect_msmp', '重连msmp', '/reconnect_msmp'],
+            handler=self.command_handlers.handle_reconnect_msmp,
+            admin_only=True,
+            description='重新连接MSMP服务',
+            usage='reconnect_msmp',
+            cooldown=10
+        )
+        
+        self.command_handler.register_command(
+            names=['reconnect_rcon', '重连rcon', '/reconnect_rcon'],
+            handler=self.command_handlers.handle_reconnect_rcon,
+            admin_only=True,
+            description='重新连接RCON服务',
+            usage='reconnect_rcon',
+            cooldown=10
+        )
             
         self.logger.info(f"已注册 {len(self.command_handler.list_commands())} 个命令")
     
@@ -822,20 +850,35 @@ class QQBotWebSocketServer:
                 
                 self.logger.info("已发送服务器启动完成通知到QQ群")
                 
-                # 尝试连接MSMP
-                await self._reconnect_msmp_after_start()
+                # 尝试连接MSMP和RCON
+                await self._reconnect_after_server_start()
                 
         except Exception as e:
             self.logger.error(f"发送启动通知失败: {e}")
 
+    async def _reconnect_after_server_start(self):
+        """服务器启动后重新连接MSMP和RCON"""
+        try:
+            self.logger.info("服务器已启动,尝试连接MSMP和RCON...")
+            
+            # 等待一段时间让服务完全启动
+            await asyncio.sleep(15)
+            
+            # 并行尝试连接MSMP和RCON
+            msmp_task = asyncio.create_task(self._reconnect_msmp_after_start())
+            rcon_task = asyncio.create_task(self._reconnect_rcon_after_start())
+            
+            # 等待两个任务完成
+            await asyncio.gather(msmp_task, rcon_task, return_exceptions=True)
+            
+            self.logger.info("服务器启动后连接尝试完成")
+            
+        except Exception as e:
+            self.logger.error(f"重新连接服务失败: {e}", exc_info=True)
+
     async def _reconnect_msmp_after_start(self):
         """服务器启动后重新连接MSMP"""
         try:
-            self.logger.info("服务器已启动,尝试连接MSMP...")
-            
-            # 等待一段时间让MSMP服务完全启动
-            await asyncio.sleep(15)
-            
             if self.msmp_client:
                 try:
                     if self.msmp_client.is_authenticated():
@@ -855,7 +898,7 @@ class QQBotWebSocketServer:
                                 await self.send_group_message(
                                     self.current_connection, 
                                     group_id, 
-                                    "已连接到Minecraft服务器管理协议"
+                                    "已连接到Minecraft服务器管理协议 (MSMP)"
                                 )
                     else:
                         self.logger.warning("MSMP服务器连接失败")
@@ -876,9 +919,51 @@ class QQBotWebSocketServer:
                                 group_id, 
                                 f"MSMP连接失败: {e}"
                             )
-                    
         except Exception as e:
-            self.logger.error(f"重新连接MSMP失败: {e}", exc_info=True)
+            self.logger.error(f"重新连接MSMP失败: {e}")
+
+    async def _reconnect_rcon_after_start(self):
+        """服务器启动后重新连接RCON"""
+        try:
+            if self.rcon_client and self.config_manager.is_rcon_enabled():
+                try:
+                    if self.rcon_client.is_connected():
+                        self.logger.info("RCON已连接,无需重复连接")
+                        return
+
+                    self.logger.info("正在连接RCON服务器...")
+                    
+                    # 尝试连接RCON
+                    if self.rcon_client.connect():
+                        self.logger.info("RCON服务器连接成功")
+                        if self.current_connection and not self.current_connection.closed:
+                            for group_id in self.allowed_groups:
+                                await self.send_group_message(
+                                    self.current_connection, 
+                                    group_id, 
+                                    "已连接到Minecraft服务器远程控制 (RCON)"
+                                )
+                    else:
+                        self.logger.warning("RCON服务器连接失败")
+                        if self.current_connection and not self.current_connection.closed:
+                            for group_id in self.allowed_groups:
+                                await self.send_group_message(
+                                    self.current_connection, 
+                                    group_id, 
+                                    "RCON连接失败,游戏命令执行功能受限"
+                                )
+                        
+                except Exception as e:
+                    self.logger.warning(f"RCON连接失败: {e}")
+                    if self.current_connection and not self.current_connection.closed:
+                        for group_id in self.allowed_groups:
+                            await self.send_group_message(
+                                self.current_connection, 
+                                group_id, 
+                                f"RCON连接失败: {e}"
+                            )
+        except Exception as e:
+            self.logger.error(f"重新连接RCON失败: {e}")
 
     async def _monitor_server_process(self, websocket, group_id: int):
         """监控服务器进程状态"""

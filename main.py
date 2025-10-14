@@ -386,7 +386,7 @@ class MsmpQQBot(ServerEventListener):
         self.logger.info("准备连接RCON服务器...")
         
         retry_count = 0
-        max_retries = 3  # RCON只尝试3次
+        max_retries = 5  # 增加重试次数
         
         while self.running and retry_count < max_retries:
             try:
@@ -406,10 +406,13 @@ class MsmpQQBot(ServerEventListener):
                 self.logger.warning(f"RCON服务器连接失败: {e}")
             
             if retry_count < max_retries:
-                delay = 10
+                delay = min(10 * retry_count, 30)  # 递增延迟，最多30秒
                 self.logger.info(f"{delay}秒后尝试重新连接RCON服务器...")
                 await asyncio.sleep(delay)
-
+        else:
+            if retry_count >= max_retries:
+                self.logger.warning(f"RCON连接失败，已达到最大重试次数 {max_retries}")
+            
     async def _try_msmp_connection(self):
         """尝试连接MSMP服务器（非阻塞）"""
         retry_count = 0

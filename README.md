@@ -42,6 +42,12 @@
   重新加载配置文件  
 • log / 日志 / /log  
   查看最近20条的服务器日志  
+• reconnect / 重连 / /reconnect  
+  重新连接所有服务(MSMP和RCON)  
+• reconnect_msmp / 重连msmp / /reconnect_msmp  
+  重新连接MSMP服务  
+• reconnect_rcon / 重连rcon / /reconnect_rcon  
+  重新连接RCON服务  
 
 直接命令执行:  
 • !<命令>  

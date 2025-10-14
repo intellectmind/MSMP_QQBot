@@ -3,7 +3,8 @@ import logging
 import sys
 import signal
 import time
-from logging.handlers import RotatingFileHandler
+import os
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from config_manager import ConfigManager, ConfigValidationError
 from msmp_client import MSMPClient, ServerEventListener
 from rcon_client import RCONClient
@@ -74,6 +75,10 @@ class ConsoleCommandHandler:
                 print(f"✗ 重新加载配置失败: {e}")
             return True
         
+        elif command_lower == 'logs':
+            self._show_logs_info()
+            return True
+        
         # 不是系统命令，返回 False 让它转发到服务器
         return False
     
@@ -136,6 +141,7 @@ class ConsoleCommandHandler:
 系统命令:
   status    - 查看连接状态
   reload    - 重新加载配置
+  logs      - 显示日志文件信息
   help      - 显示此帮助
   exit      - 退出程序
 
@@ -149,6 +155,24 @@ class ConsoleCommandHandler:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """)
     
+    def _show_logs_info(self):
+        """显示日志文件信息"""
+        log_dir = "logs"
+        if not os.path.exists(log_dir):
+            print("日志目录不存在")
+            return
+        
+        print("日志文件信息:")
+        print("━━━━━━━━━━━━━━")
+        for file in os.listdir(log_dir):
+            if file.endswith('.log'):
+                file_path = os.path.join(log_dir, file)
+                size = os.path.getsize(file_path)
+                mtime = time.strftime('%Y-%m-%d %H:%M:%S', 
+                                    time.localtime(os.path.getmtime(file_path)))
+                print(f"{file}: {size/1024/1024:.2f} MB, 修改时间: {mtime}")
+        print("━━━━━━━━━━━━━━")
+    
     def stop(self):
         """停止控制台处理"""
         self.running = False
@@ -161,6 +185,9 @@ class MsmpQQBot(ServerEventListener):
         self.config_path = config_path
         self.start_time = time.time()
         
+        # 先设置基础日志，用于配置加载错误
+        self._setup_basic_logging()
+        
         # 加载配置
         try:
             self.config_manager = ConfigManager(config_path)
@@ -168,7 +195,7 @@ class MsmpQQBot(ServerEventListener):
             print(f"配置验证失败:\n{e}")
             sys.exit(1)
         
-        # 设置日志
+        # 设置完整日志系统
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
         
@@ -188,30 +215,86 @@ class MsmpQQBot(ServerEventListener):
         self.logger.info("MSMP_QQBot 初始化完成")
         self.logger.info("="*50)
     
+    def _setup_basic_logging(self):
+        """设置基础日志（用于配置加载阶段）"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
+    
     def _setup_logging(self):
-        """设置日志"""
-        # 文件处理器 - 使用轮转
-        file_handler = RotatingFileHandler(
-            'msmp_qqbot.log',
+        """设置完整的日志系统"""
+        # 创建日志目录
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # 获取根日志记录器
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG if self.config_manager.is_debug_mode() else logging.INFO)
+        
+        # 清除现有的处理器
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+        
+        # 1. 主日志文件 - 按大小轮转
+        main_handler = RotatingFileHandler(
+            os.path.join(log_dir, 'msmp_qqbot.log'),
             maxBytes=10*1024*1024,  # 10MB
             backupCount=5,
             encoding='utf-8'
         )
-        file_handler.setFormatter(logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        ))
+        main_handler.setLevel(logging.DEBUG)
         
-        # 控制台处理器
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(logging.Formatter(
-            '%(asctime)s - %(levelname)s - %(message)s'
-        ))
-        
-        # 配置根日志记录器
-        logging.basicConfig(
-            level=logging.DEBUG if self.config_manager.is_debug_mode() else logging.INFO,
-            handlers=[console_handler, file_handler]
+        # 2. 错误日志文件 - 单独记录错误
+        error_handler = RotatingFileHandler(
+            os.path.join(log_dir, 'error.log'),
+            maxBytes=5*1024*1024,   # 5MB
+            backupCount=3,
+            encoding='utf-8'
         )
+        error_handler.setLevel(logging.ERROR)
+        
+        # 3. 控制台处理器
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        
+        # 4. 运行日志 - 按天轮转
+        runtime_handler = TimedRotatingFileHandler(
+            os.path.join(log_dir, 'runtime.log'),
+            when='midnight',  # 每天轮转
+            interval=1,
+            backupCount=7,    # 保留7天
+            encoding='utf-8'
+        )
+        runtime_handler.setLevel(logging.INFO)
+        
+        # 设置日志格式
+        detailed_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+        )
+        simple_formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s'
+        )
+        
+        # 应用格式
+        main_handler.setFormatter(detailed_formatter)
+        error_handler.setFormatter(detailed_formatter)
+        console_handler.setFormatter(simple_formatter)
+        runtime_handler.setFormatter(simple_formatter)
+        
+        # 添加处理器到根日志记录器
+        root_logger.addHandler(main_handler)
+        root_logger.addHandler(error_handler)
+        root_logger.addHandler(console_handler)
+        root_logger.addHandler(runtime_handler)
+        
+        # 设置特定库的日志级别
+        logging.getLogger('websockets').setLevel(logging.WARNING)
+        logging.getLogger('asyncio').setLevel(logging.WARNING)
+        
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("日志系统初始化完成")
     
     async def start(self):
         """启动服务"""

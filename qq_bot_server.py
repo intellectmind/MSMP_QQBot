@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 import time
 from command_handler import CommandHandler, CommandHandlers
 from rcon_client import RCONClient
+from logging.handlers import RotatingFileHandler
 
 class QQBotWebSocketServer:
     """
@@ -37,9 +38,13 @@ class QQBotWebSocketServer:
         
         # 日志文件相关
         self.server_log_file = None
-        self.log_file_path = "mc_server.log"
-        self.max_log_file_size = 10 * 1024 * 1024
+        self.log_dir = "logs"
+        self.log_file_path = os.path.join(self.log_dir, "mc_server.log")
+        self.max_log_file_size = 10 * 1024 * 1024  # 10MB
         self.backup_count = 5
+        
+        # 确保日志目录存在
+        os.makedirs(self.log_dir, exist_ok=True)
 
         # 初始化命令系统
         self.command_handler = None
@@ -168,7 +173,7 @@ class QQBotWebSocketServer:
             self.logger.info("WebSocket服务器已停止")
     
     async def _handle_connection(self, websocket, path):
-        """处理客户端连接 - 修复 #3: 资源泄漏问题"""
+        """处理客户端连接"""
         client_ip = websocket.remote_address[0]
         
         # 检查鉴权令牌
@@ -219,7 +224,7 @@ class QQBotWebSocketServer:
                 self.logger.error(f"连接处理异常: {e}", exc_info=True)
                 
         finally:
-            # 确保资源清理 - 修复 #3
+            # 确保资源清理
             self.connected_clients.discard(websocket)
             if self.current_connection == websocket:
                 self.current_connection = None
@@ -416,7 +421,6 @@ class QQBotWebSocketServer:
                         timeout=30.0
                     )
                     
-                    # 修复：正确处理返回值为 None 的情况
                     if result is not None:
                         await self.send_private_message(websocket, user_id, result)
                     else:

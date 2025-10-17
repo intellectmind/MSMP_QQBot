@@ -83,7 +83,12 @@ class ConfigManager:
             'notifications': {
                 'server_events': True,
                 'player_events': True,
-                'log_messages': False
+                'log_messages': False,
+                'chunk_monitor': {
+                    'enabled': False,
+                    'notify_admins': True,
+                    'notify_groups': True
+                }
             },
             'advanced': {
                 'reconnect_interval': 300,
@@ -270,7 +275,28 @@ class ConfigManager:
     
     def is_player_event_notify_enabled(self) -> bool:
         return self.config.get('notifications', {}).get('player_events', True)
-    
+        
+    # 区块监控配置
+    def get_chunk_monitor_config(self) -> Dict[str, bool]:
+        """获取区块监控配置"""
+        return self.config.get('notifications', {}).get('chunk_monitor', {
+            'enabled': False,
+            'notify_admins': True,
+            'notify_groups': True
+        })
+
+    def is_chunk_monitor_enabled(self) -> bool:
+        """检查区块监控通知是否启用"""
+        return self.get_chunk_monitor_config().get('enabled', False)
+
+    def should_notify_admins_on_chunk_monitor(self) -> bool:
+        """检查是否向管理员发送区块监控通知"""
+        return self.get_chunk_monitor_config().get('notify_admins', True)
+
+    def should_notify_groups_on_chunk_monitor(self) -> bool:
+        """检查是否向QQ群发送区块监控通知"""
+        return self.get_chunk_monitor_config().get('notify_groups', True)
+        
     # 高级配置
     def get_reconnect_interval(self) -> int:
         return self.config.get('advanced', {}).get('reconnect_interval', 300)

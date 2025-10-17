@@ -651,16 +651,15 @@ class QQBotWebSocketServer:
             if os.name == 'nt':  # Windows
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
             
+            # 使用二进制模式打开stdout，手动处理编码
             self.server_process = subprocess.Popen(
                 start_script,
                 cwd=working_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
+                text=False,
                 bufsize=1,
-                universal_newlines=True,
                 creationflags=creationflags
             )
             
@@ -680,6 +679,80 @@ class QQBotWebSocketServer:
             self.logger.error(f"启动服务器进程失败: {e}", exc_info=True)
             raise
 
+    def _decode_line(self, line_bytes: bytes) -> str:
+        """尝试用多种编码解码一行输出，优先保留中文"""
+        if isinstance(line_bytes, str):
+            return line_bytes
+        
+        # 按优先级尝试编码 - GBK优先（包含中文），再尝试UTF-8
+        encodings = ['gbk', 'gb2312', 'utf-8', 'utf-16', 'latin-1']
+        
+        for encoding in encodings:
+            try:
+                return line_bytes.decode(encoding)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        
+        # 最后的救命稻草 - 用 replace 模式强制解码
+        return line_bytes.decode('utf-8', errors='replace')
+
+    async def _read_server_output(self):
+        """读取服务器输出并在控制台显示，同时存储日志"""
+        if not self.server_process:
+            return
+        
+        try:
+            self.logger.info("开始采集服务器输出...")
+            self.logger.info("=" * 60)
+            self.logger.info("Minecraft服务器日志 (您仍可在服务器窗口输入命令)")
+            self.logger.info("=" * 60)
+            
+            while self.server_process and self.server_process.poll() is None:
+                try:
+                    # 使用 readline() 读取一行（二进制）
+                    line_bytes = await asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        self.server_process.stdout.readline
+                    )
+                    
+                    if line_bytes:
+                        # 解码字节为字符串
+                        try:
+                            line_str = self._decode_line(line_bytes)
+                        except Exception as e:
+                            self.logger.warning(f"解码失败: {e}")
+                            continue
+                        
+                        line_str = line_str.strip()
+                        
+                        if line_str:
+                            # 直接输出到控制台，带前缀
+                            print(f"[MC Server] {line_str}")
+                            
+                            # 存储日志到列表和文件
+                            self._store_server_log(line_str)
+                            
+                            # 检查服务器启动完成的关键词
+                            if self._is_server_ready(line_str):
+                                self.logger.info("检测到服务器启动完成")
+                                asyncio.create_task(self._send_server_started_notification())
+                                
+                except Exception as e:
+                    self.logger.error(f"读取输出行失败: {e}")
+                    await asyncio.sleep(0.1)
+                    continue
+                
+                await asyncio.sleep(0.01)
+            
+            self.logger.info("=" * 60)
+            self.logger.info("服务器输出采集已结束")
+            self.logger.info("=" * 60)
+                    
+        except Exception as e:
+            self.logger.error(f"读取服务器输出失败: {e}", exc_info=True)
+        finally:
+            self._close_log_file()
+
     async def _handle_console_input(self):
         """处理控制台输入并发送到服务器进程"""
         import sys
@@ -692,58 +765,19 @@ class QQBotWebSocketServer:
                 if line:
                     line = line.strip()
                     if line and self.server_process:
-                        # 发送到服务器进程
-                        self.server_process.stdin.write(line + '\n')
-                        self.server_process.stdin.flush()
-                        self.logger.debug(f"已发送命令到服务器: {line}")
+                        # 编码为字节（UTF-8）并发送
+                        try:
+                            command_bytes = (line + '\n').encode('utf-8')
+                            self.server_process.stdin.write(command_bytes)
+                            self.server_process.stdin.flush()
+                            self.logger.debug(f"已发送命令到服务器: {line}")
+                        except Exception as e:
+                            self.logger.error(f"发送命令到服务器失败: {e}")
             except Exception as e:
                 self.logger.error(f"处理控制台输入失败: {e}")
                 break
-        await asyncio.sleep(0.1)
-
-    async def _read_server_output(self):
-        """读取服务器输出并在控制台显示，同时存储日志"""
-        if not self.server_process:
-            return
-        
-        try:
-            self.logger.info("开始捕获服务器输出...")
-            self.logger.info("=" * 60)
-            self.logger.info("Minecraft服务器日志 (您仍可在服务器窗口输入命令)")
-            self.logger.info("=" * 60)
             
-            while self.server_process and self.server_process.poll() is None:
-                try:
-                    line = await asyncio.get_event_loop().run_in_executor(
-                        None, 
-                        self.server_process.stdout.readline
-                    )
-                    if line:
-                        line = line.strip()
-                        if line:
-                            # 直接输出到控制台,带前缀
-                            print(f"[MC Server] {line}")
-                            
-                            # 存储日志到列表
-                            self._store_server_log(line)
-                            
-                            # 检查服务器启动完成的关键词
-                            if self._is_server_ready(line):
-                                self.logger.info("检测到服务器启动完成")
-                                asyncio.create_task(self._send_server_started_notification())
-                                
-                except Exception as e:
-                    self.logger.error(f"读取输出行失败: {e}")
-                    break
-                
-                await asyncio.sleep(0.1)
-            
-            self.logger.info("=" * 60)
-            self.logger.info("服务器输出捕获已结束")
-            self.logger.info("=" * 60)
-                
-        except Exception as e:
-            self.logger.error(f"读取服务器输出失败: {e}", exc_info=True)
+            await asyncio.sleep(0.1)
 
     def _setup_log_file(self):
         """设置日志文件"""
@@ -806,7 +840,6 @@ class QQBotWebSocketServer:
 
     def _store_server_log(self, log_line: str):
         """存储服务器日志到内存和文件"""
-        # 添加时间戳
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         formatted_log = f"[{timestamp}] {log_line}"
@@ -820,6 +853,11 @@ class QQBotWebSocketServer:
         
         # 写入到日志文件
         self._write_to_log_file(formatted_log)
+        
+        # 检查是否是区块监控消息
+        if self.config_manager and self.config_manager.is_chunk_monitor_enabled():
+            if self._is_chunk_monitor_message(log_line):
+                asyncio.create_task(self._send_chunk_monitor_notification(log_line))
         
         # 调试输出
         if self.logger.isEnabledFor(logging.DEBUG):
@@ -998,3 +1036,48 @@ class QQBotWebSocketServer:
             self.logger.error(f"监控服务器进程失败: {e}", exc_info=True)
             self.server_process = None
             self._close_log_file()
+
+    CHUNK_MONITOR_PATTERN = r'\[chunkmonitor\].*?\[区块监控\].*?世界'
+
+    def _is_chunk_monitor_message(self, log_line: str) -> bool:
+        """检查是否是区块监控消息"""
+        return bool(re.search(self.CHUNK_MONITOR_PATTERN, log_line, re.IGNORECASE))
+
+    async def _send_chunk_monitor_notification(self, log_line: str):
+        """发送区块监控通知到QQ"""
+        try:
+            if not self.current_connection or self.current_connection.closed:
+                self.logger.warning("无法发送区块监控通知:QQ机器人未连接")
+                return
+            
+            # 清理日志行中的颜色代码
+            cleaned_message = re.sub(r'§[0-9a-fk-or]', '', log_line).strip()
+            
+            # 向管理员发送私聊通知
+            if self.config_manager.should_notify_admins_on_chunk_monitor():
+                for admin_id in self.config_manager.get_qq_admins():
+                    try:
+                        await self.send_private_message(
+                            self.current_connection,
+                            admin_id,
+                            f"区块监控告警:\n{cleaned_message}"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"发送管理员私聊通知失败: {e}")
+            
+            # 向QQ群发送通知
+            if self.config_manager.should_notify_groups_on_chunk_monitor():
+                for group_id in self.allowed_groups:
+                    try:
+                        await self.send_group_message(
+                            self.current_connection,
+                            group_id,
+                            f"区块监控告警:\n{cleaned_message}"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"发送群通知失败: {e}")
+            
+            self.logger.info(f"已发送区块监控通知: {log_line[:100]}")
+            
+        except Exception as e:
+            self.logger.error(f"发送区块监控通知异常: {e}", exc_info=True)

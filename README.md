@@ -142,6 +142,14 @@ notifications:
   player_events: true
   # 是否在控制台显示详细消息日志
   log_messages: false
+  # 需搭配chunkmonitor插件使用，并启用控制台（https://github.com/intellectmind/ChunkMonitor）
+  chunk_monitor:
+    # 是否启用区块监控通知
+    enabled: true
+    # 是否向管理员发送私聊通知
+    notify_admins: true
+    # 是否向QQ群发送通知
+    notify_groups: true
 
 # 高级配置
 advanced:

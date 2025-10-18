@@ -175,6 +175,47 @@ class QQBotWebSocketServer:
             usage='reconnect_rcon',
             cooldown=10
         )
+
+        # 系统监控命令
+        self.command_handler.register_command(
+            names=['sysinfo', '系统信息', '/sysinfo', '系统', 'sys'],
+            handler=self.command_handlers.handle_sysinfo,
+            admin_only=True,
+            description='查看服务器系统信息(CPU、内存、硬盘、网络)',
+            usage='sysinfo',
+            cooldown=5,
+            command_key='sysinfo'
+        )
+
+        self.command_handler.register_command(
+            names=['disk', '硬盘', '/disk', '磁盘', '磁盘使用'],
+            handler=self.command_handlers.handle_disk,
+            admin_only=True,
+            description='查看服务器硬盘详细使用情况',
+            usage='disk',
+            cooldown=5,
+            command_key='disk'
+        )
+
+        self.command_handler.register_command(
+            names=['process', '进程', '/process', 'proc', 'java'],
+            handler=self.command_handlers.handle_process,
+            admin_only=True,
+            description='查看Java进程运行信息',
+            usage='process',
+            cooldown=5,
+            command_key='process'
+        )
+
+        self.command_handler.register_command(
+            names=['network', '网络', '/network', 'net', '网络信息'],
+            handler=self.command_handlers.handle_network,
+            admin_only=True,
+            description='查看网络信息和实时带宽速度',
+            usage='network',
+            cooldown=5,
+            command_key='network'
+        )
             
         self.logger.info(f"已注册 {len(self.command_handler.list_commands())} 个命令")
     

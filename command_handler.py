@@ -862,3 +862,64 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"读取日志文件失败: {e}")
             return []
+
+    async def handle_sysinfo(self, **kwargs) -> str:
+        """处理sysinfo命令 - 显示系统信息"""
+        try:
+            from system_monitor import SystemMonitor
+            
+            monitor = SystemMonitor(self.logger)
+            stats = monitor.get_system_stats()
+            
+            if stats:
+                return monitor.format_system_info(stats)
+            else:
+                return "无法获取系统信息"
+                
+        except ImportError:
+            return "系统监控模块未安装,请先安装 psutil: pip install psutil"
+        except Exception as e:
+            self.logger.error(f"执行sysinfo命令失败: {e}", exc_info=True)
+            return f"获取系统信息失败: {e}"
+
+    async def handle_disk(self, **kwargs) -> str:
+        """处理disk命令 - 显示磁盘信息"""
+        try:
+            from system_monitor import SystemMonitor
+            
+            monitor = SystemMonitor(self.logger)
+            return monitor.get_disk_info("/")
+            
+        except ImportError:
+            return "系统监控模块未安装,请先安装 psutil: pip install psutil"
+        except Exception as e:
+            self.logger.error(f"执行disk命令失败: {e}", exc_info=True)
+            return f"获取磁盘信息失败: {e}"
+
+    async def handle_process(self, **kwargs) -> str:
+        """处理process命令 - 显示Java进程信息"""
+        try:
+            from system_monitor import SystemMonitor
+            
+            monitor = SystemMonitor(self.logger)
+            return monitor.get_process_info("java")
+            
+        except ImportError:
+            return "系统监控模块未安装,请先安装 psutil: pip install psutil"
+        except Exception as e:
+            self.logger.error(f"执行process命令失败: {e}", exc_info=True)
+            return f"获取进程信息失败: {e}"
+
+    async def handle_network(self, **kwargs) -> str:
+        """处理network命令 - 显示网络信息和实时带宽"""
+        try:
+            from system_monitor import SystemMonitor
+            
+            monitor = SystemMonitor(self.logger)
+            return monitor.get_network_info()
+            
+        except ImportError:
+            return "系统监控模块未安装,请先安装 psutil: pip install psutil"
+        except Exception as e:
+            self.logger.error(f"执行network命令失败: {e}", exc_info=True)
+            return f"获取网络信息失败: {e}"

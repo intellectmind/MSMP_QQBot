@@ -48,6 +48,14 @@
   重新连接MSMP服务  
 • reconnect_rcon / 重连rcon / /reconnect_rcon  
   重新连接RCON服务  
+• sysinfo / 系统信息 / /sysinfo  
+  查看服务器系统信息(CPU、内存、硬盘、网络)  
+• disk / 硬盘 / /disk  
+  查看服务器硬盘详细使用情况  
+• process / 进程 / /process  
+  查看Java进程运行信息  
+• network / 网络 / /network  
+  查看网络信息和实时带宽速度  
 
 直接命令执行:  
 • !<命令>  

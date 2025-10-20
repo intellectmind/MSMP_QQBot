@@ -33,9 +33,9 @@ class ConsoleCommandHandler:
                     if not line:
                         continue
                     
-                    # 优先处理Bot系统命令
+                    # 优先处理Bot系统命令（带#前缀）
                     if await self._handle_bot_command(line):
-                        continue
+                        continue  # 如果是系统命令，处理完就结束，不转发
                     
                     # 否则转发到Minecraft服务器
                     await self._forward_to_minecraft(line)
@@ -45,43 +45,234 @@ class ConsoleCommandHandler:
                 await asyncio.sleep(1)
     
     async def _handle_bot_command(self, command: str) -> bool:
-        """
-        处理Bot系统命令
-        返回 True 表示已处理，False 表示需要转发到服务器
-        """
-        command_lower = command.lower()
+        """处理Bot系统命令"""
+        if command.startswith('#'):
+            # 去掉 # 前缀
+            system_command = command[1:].strip().lower()
+            
+            if system_command == 'status':
+                status_info = await self._get_connection_status()
+                print(status_info)
+            elif system_command == 'exit':
+                self.running = False
+                self.bot.running = False
+                print("正在退出程序...")
+            elif system_command == 'help':
+                self._print_console_help()
+            elif system_command == 'reload':
+                try:
+                    self.bot.config_manager.reload()
+                    print("✓ 配置已重新加载")
+                except Exception as e:
+                    print(f"✗ 重新加载配置失败: {e}")
+            elif system_command == 'logs':
+                self._show_logs_info()
+            elif system_command == 'list':
+                # 通过QQ命令系统执行list命令
+                result = await self._handle_qq_command('list')
+                print(result)
+            elif system_command == 'tps':
+                result = await self._handle_qq_command('tps')
+                print(result)
+            elif system_command == 'rules':
+                result = await self._handle_qq_command('rules')
+                print(result)
+            elif system_command == 'sysinfo':
+                result = await self._handle_qq_command('sysinfo')
+                print(result)
+            elif system_command == 'disk':
+                result = await self._handle_qq_command('disk')
+                print(result)
+            elif system_command == 'process':
+                result = await self._handle_qq_command('process')
+                print(result)
+            elif system_command == 'network':
+                result = await self._handle_qq_command('network')
+                print(result)
+            elif system_command == 'listeners':
+                result = await self._handle_qq_command('listeners')
+                print(result)
+            elif system_command == 'reconnect':
+                result = await self._handle_qq_command('reconnect')
+                print(result)
+            elif system_command == 'reconnect_msmp':
+                result = await self._handle_qq_command('reconnect_msmp')
+                print(result)
+            elif system_command == 'reconnect_rcon':
+                result = await self._handle_qq_command('reconnect_rcon')
+                print(result)
+            elif system_command == 'start':
+                # 控制台直接启动服务器
+                result = await self._handle_console_start()
+                print(result)
+            elif system_command == 'stop':
+                # 控制台直接停止服务器
+                result = await self._handle_console_stop()
+                print(result)
+            elif system_command == 'server_status':
+                # 查看服务器进程状态
+                result = await self._get_server_process_status()
+                print(result)
+            else:
+                print(f"未知的系统命令: #{system_command}，输入 #help 查看帮助")
+            
+            return True  # 已处理为系统命令
         
-        # Bot系统命令
-        if command_lower == 'status':
-            status_info = await self._get_connection_status()
-            print(status_info)
-            return True
+        # 检查是否是已知的系统命令（无前缀）给出提示
+        system_commands = {
+            'status', 'exit', 'help', 'reload', 'logs',
+            'list', 'tps', 'rules', 'sysinfo', 'disk', 
+            'process', 'network', 'listeners',
+            'reconnect', 'reconnect_msmp', 'reconnect_rcon',
+            'start', 'stop', 'server_status'
+        }
         
-        elif command_lower == 'exit':
-            self.logger.info("收到退出命令")
-            self.running = False
-            self.bot.running = False
-            return True
+        if command.lower() in system_commands:
+            print(f"提示: 系统命令请使用 # 前缀，例如: #{command}")
+            print(f"当前输入 '{command}' 将被转发到Minecraft服务器")
+            return False  # 仍然转发到服务器，但给出提示
         
-        elif command_lower == 'help':
-            self._print_console_help()
-            return True
-        
-        elif command_lower == 'reload':
-            try:
-                self.bot.config_manager.reload()
-                print("✓ 配置已重新加载")
-            except Exception as e:
-                print(f"✗ 重新加载配置失败: {e}")
-            return True
-        
-        elif command_lower == 'logs':
-            self._show_logs_info()
-            return True
-        
-        # 不是系统命令，返回 False 让它转发到服务器
-        return False
+        return False  # 不是系统命令，转发到服务器
+
+    async def _handle_console_start(self) -> str:
+        """控制台直接启动服务器"""
+        try:
+            # 检查是否已有服务器进程在运行
+            if (self.bot.qq_server and 
+                self.bot.qq_server.server_process and 
+                self.bot.qq_server.server_process.poll() is None):
+                return "服务器已经在运行中"
+            
+            # 获取启动脚本路径
+            start_script = self.bot.config_manager.get_server_start_script()
+            if not start_script:
+                return "服务器启动脚本未配置，请在 config.yml 中配置 server.start_script"
+            
+            if not os.path.exists(start_script):
+                return f"启动脚本不存在: {start_script}"
+            
+            print("正在启动Minecraft服务器...")
+            
+            # 直接调用启动方法
+            await self.bot.qq_server._start_server_process(None, 0)
+            
+            # 返回启动信息
+            connection_info = []
+            if self.bot.config_manager.is_msmp_enabled():
+                connection_info.append("MSMP管理协议")
+            if self.bot.config_manager.is_rcon_enabled():
+                connection_info.append("RCON远程控制")
+            
+            info_lines = [
+                "服务器启动命令已执行",
+                f"启动脚本: {start_script}",
+                f"自动连接: {', '.join(connection_info) if connection_info else '无'}",
+                "提示:",
+                "  - 服务器启动需要一些时间，请耐心等待",
+                "  - 使用 #server_status 查看服务器进程状态",
+                "  - 使用 #status 查看连接状态",
+                "  - 查看控制台输出了解启动进度"
+            ]
+            
+            return "\n".join(info_lines)
+            
+        except Exception as e:
+            self.logger.error(f"控制台启动服务器失败: {e}")
+            return f"启动服务器失败: {e}"
+
+    async def _handle_console_stop(self) -> str:
+        """控制台直接停止服务器"""
+        try:
+            client_type, client = self.bot.command_handlers._get_active_client()
+            
+            if not client:
+                return "服务器连接未就绪，无法执行停止命令"
+            
+            print("正在停止Minecraft服务器...")
+            
+            if client_type == 'msmp':
+                try:
+                    # 检查服务器状态
+                    status = client.get_server_status_sync()
+                    if not status.get('started', False):
+                        return "服务器已经是停止状态"
+                    
+                    result = client.execute_command_sync("server/stop")
+                    
+                    if 'result' in result:
+                        return "停止服务器命令已发送"
+                    else:
+                        error_msg = result.get('error', {}).get('message', '未知错误')
+                        return f"停止服务器失败: {error_msg}"
+                
+                except Exception as e:
+                    return f"MSMP停止命令失败: {e}"
+            
+            else:  # rcon
+                success = client.stop_server()
+                if success:
+                    return "停止服务器命令已发送"
+                else:
+                    return "RCON停止命令失败"
+                    
+        except Exception as e:
+            self.logger.error(f"控制台停止服务器失败: {e}")
+            return f"停止服务器失败: {e}"
+
+    async def _get_server_process_status(self) -> str:
+        """获取服务器进程状态"""
+        try:
+            if not self.bot.qq_server:
+                return "QQ服务器未初始化"
+            
+            server_process = self.bot.qq_server.server_process
+            
+            if not server_process:
+                return "服务器进程状态: 未启动"
+            
+            return_code = server_process.poll()
+            
+            if return_code is None:
+                # 进程正在运行
+                lines = [
+                    "服务器进程状态: 运行中",
+                    f"进程PID: {server_process.pid}",
+                    f"日志文件: {self.bot.qq_server.log_file_path}",
+                    f"日志行数: {len(self.bot.qq_server.server_logs)}"
+                ]
+                
+                # 如果有最近的日志，显示最后几条
+                recent_logs = self.bot.qq_server.get_recent_logs(3)
+                if recent_logs:
+                    lines.append("最近日志:")
+                    for log in recent_logs:
+                        lines.append(f"  - {log}")
+                
+                return "\n".join(lines)
+            else:
+                return f"服务器进程状态: 已停止 (退出码: {return_code})"
+                
+        except Exception as e:
+            self.logger.error(f"获取服务器进程状态失败: {e}")
+            return f"获取服务器状态失败: {e}"
     
+    async def _handle_qq_command(self, command: str) -> str:
+        """通过QQ命令系统处理命令"""
+        try:
+            # 模拟QQ命令处理
+            if hasattr(self.bot.qq_server, 'command_handlers'):
+                handler_method = getattr(self.bot.qq_server.command_handlers, f'handle_{command}', None)
+                if handler_method and asyncio.iscoroutinefunction(handler_method):
+                    result = await handler_method()
+                    return result
+                elif handler_method:
+                    result = handler_method()
+                    return result
+            return f"命令 '{command}' 处理失败或未实现"
+        except Exception as e:
+            self.logger.error(f"处理QQ命令失败: {e}")
+            return f"命令执行失败: {e}"
+
     async def _forward_to_minecraft(self, command: str):
         """转发命令到Minecraft服务器"""
         try:
@@ -90,9 +281,16 @@ class ConsoleCommandHandler:
                 self.bot.qq_server.server_process.poll() is None):
                 
                 # 发送命令到服务器进程
-                self.bot.qq_server.server_process.stdin.write(command + '\n')
-                self.bot.qq_server.server_process.stdin.flush()
-                self.logger.debug(f"已转发命令到服务器: {command}")
+                try:
+                    # 确保编码为字节
+                    command_bytes = (command + '\n').encode('utf-8')
+                    self.bot.qq_server.server_process.stdin.write(command_bytes)
+                    self.bot.qq_server.server_process.stdin.flush()
+                    self.logger.debug(f"已转发命令到服务器: {command}")
+                except BrokenPipeError:
+                    print("错误: 服务器进程的stdin管道已断开")
+                except Exception as e:
+                    print(f"错误: 转发命令失败 - {e}")
             else:
                 print("错误: Minecraft服务器未运行")
                 
@@ -136,24 +334,45 @@ class ConsoleCommandHandler:
     def _print_console_help(self):
         """打印控制台帮助信息"""
         print("""
-控制台命令帮助
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-系统命令:
-  status    - 查看连接状态
-  reload    - 重新加载配置
-  logs      - 显示日志文件信息
-  help      - 显示此帮助
-  exit      - 退出程序
+    控制台命令帮助 (使用 # 前缀)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    系统命令 (#前缀):
+      #status       - 查看连接状态
+      #reload       - 重新加载配置
+      #logs         - 显示日志文件信息
+      #help         - 显示此帮助
+      #exit         - 退出程序
 
-服务器命令:
-  直接输入任意命令将转发到Minecraft服务器
-  例如: say Hello 或 list
+    服务器管理命令 (#前缀):
+      #start        - 启动Minecraft服务器
+      #stop         - 停止Minecraft服务器
+      #server_status - 查看服务器进程状态
 
-提示:
-  - 服务器必须处于运行状态才能接收命令
-  - 所有非系统命令都会被转发到服务器
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-""")
+    服务器查询命令 (#前缀):
+      #list         - 查看在线玩家
+      #tps          - 查看服务器TPS
+      #rules        - 查看服务器规则
+      #sysinfo      - 查看系统信息
+      #disk         - 查看磁盘信息  
+      #process      - 查看Java进程
+      #network      - 查看网络信息
+
+    管理命令 (#前缀):
+      #listeners    - 查看监听规则
+      #reconnect    - 重连所有服务
+      #reconnect_msmp - 重连MSMP
+      #reconnect_rcon - 重连RCON
+
+    服务器命令 (无前缀):
+      直接输入任意命令将转发到Minecraft服务器
+      例如: list 或 say Hello
+
+    提示:
+      - 带 # 前缀的命令由MSMP系统处理
+      - 无前缀的命令直接转发到Minecraft服务器
+      - start/stop 命令现在支持控制台直接使用
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    """)
     
     def _show_logs_info(self):
         """显示日志文件信息"""

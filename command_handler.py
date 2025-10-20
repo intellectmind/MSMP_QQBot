@@ -588,7 +588,7 @@ class CommandHandlers:
             return f"停止服务器失败: {e}"
     
     async def handle_start(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
-        """处理start命令(管理员)"""
+        """处理start命令(管理员) - 支持MSMP和RCON"""
         try:
             # 检查是否已有服务器进程在运行
             if self.qq_server.server_process and self.qq_server.server_process.poll() is None:
@@ -603,13 +603,14 @@ class CommandHandlers:
                 )
             
             if not os.path.exists(start_script):
-                return f"❌ 启动脚本不存在: {start_script}"
+                return f"启动脚本不存在: {start_script}"
             
             # 发送执行中提示
-            if is_private:
-                await self.qq_server.send_private_message(websocket, user_id, "正在启动服务器...")
-            else:
-                await self.qq_server.send_group_message(websocket, group_id, "正在启动服务器...")
+            if websocket and not websocket.closed:
+                if is_private:
+                    await self.qq_server.send_private_message(websocket, user_id, "正在启动服务器...")
+                else:
+                    await self.qq_server.send_group_message(websocket, group_id, "正在启动服务器...")
             
             # 调用qq_server的启动方法
             await self.qq_server._start_server_process(websocket, group_id)
@@ -621,7 +622,7 @@ class CommandHandlers:
             if self.config_manager.is_rcon_enabled():
                 connection_info.append("RCON远程控制")
             
-            if connection_info:
+            if connection_info and websocket and not websocket.closed:
                 info_msg = f"服务器启动后，将自动尝试连接: {', '.join(connection_info)}"
                 if is_private:
                     await self.qq_server.send_private_message(websocket, user_id, info_msg)
@@ -923,3 +924,15 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"执行network命令失败: {e}", exc_info=True)
             return f"获取网络信息失败: {e}"
+
+    async def handle_listeners(self, **kwargs) -> str:
+        """处理 listeners 命令 - 显示所有自定义监听规则"""
+        try:
+            if not self.qq_server.custom_listener:
+                return "自定义消息监听器未初始化"
+            
+            return self.qq_server.custom_listener.get_rules_info()
+            
+        except Exception as e:
+            self.logger.error(f"执行 listeners 命令失败: {e}", exc_info=True)
+            return f"获取监听规则失败: {e}"

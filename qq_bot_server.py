@@ -11,6 +11,7 @@ import time
 from command_handler import CommandHandler, CommandHandlers
 from rcon_client import RCONClient
 from logging.handlers import RotatingFileHandler
+from custom_listener import CustomMessageListener
 
 class QQBotWebSocketServer:
     """
@@ -50,6 +51,17 @@ class QQBotWebSocketServer:
         self.command_handler = None
         self.command_handlers = None
         self._init_command_system()
+
+        # 初始化自定义消息监听器
+        if self.config_manager:
+            try:
+                self.custom_listener = CustomMessageListener(self.config_manager, self.logger)
+                self.logger.info("自定义消息监听器已初始化")
+            except Exception as e:
+                self.logger.error(f"初始化自定义消息监听器失败: {e}")
+                self.custom_listener = None
+        else:
+            self.custom_listener = None
     
     def _init_command_system(self):
         """初始化命令系统"""
@@ -215,6 +227,15 @@ class QQBotWebSocketServer:
             usage='network',
             cooldown=5,
             command_key='network'
+        )
+
+        self.command_handler.register_command(
+            names=['listeners', '监听规则', '/listeners', '监听'],
+            handler=self.command_handlers.handle_listeners,
+            admin_only=True,
+            description='查看所有自定义消息监听规则',
+            usage='listeners',
+            cooldown=5
         )
             
         self.logger.info(f"已注册 {len(self.command_handler.list_commands())} 个命令")
@@ -674,7 +695,7 @@ class QQBotWebSocketServer:
         return self.current_connection is not None and not self.current_connection.closed
     
     async def _start_server_process(self, websocket, group_id: int = 0, private_user_id: int = None):
-        """启动服务器进程(由命令处理器调用)"""
+        """启动服务器进程 - 支持控制台和QQ调用"""
         try:
             # 设置日志文件
             self._setup_log_file()
@@ -707,17 +728,30 @@ class QQBotWebSocketServer:
             self.logger.info(f"服务器进程已创建,PID: {self.server_process.pid}")
             self.logger.info("现在您可以在控制台直接输入命令到Minecraft服务器")
             
+            # 发送启动成功通知（如果有WebSocket连接）
+            if websocket and not websocket.closed:
+                if group_id > 0:
+                    await self.send_group_message(websocket, group_id, "服务器启动命令已执行")
+                elif private_user_id:
+                    await self.send_private_message(websocket, private_user_id, "服务器启动命令已执行")
+            
             # 启动后台任务来读取输出
             asyncio.create_task(self._read_server_output())
-            
-            # 启动后台任务来处理控制台输入
-            asyncio.create_task(self._handle_console_input())
             
             # 启动后台任务来监控进程状态
             asyncio.create_task(self._monitor_server_process(websocket, group_id))
             
         except Exception as e:
             self.logger.error(f"启动服务器进程失败: {e}", exc_info=True)
+            
+            # 发送错误通知（如果有WebSocket连接）
+            if websocket and not websocket.closed:
+                error_msg = f"启动服务器失败: {e}"
+                if group_id > 0:
+                    await self.send_group_message(websocket, group_id, error_msg)
+                elif private_user_id:
+                    await self.send_private_message(websocket, private_user_id, error_msg)
+            
             raise
 
     def _decode_line(self, line_bytes: bytes) -> str:
@@ -808,12 +842,22 @@ class QQBotWebSocketServer:
                     if line and self.server_process:
                         # 编码为字节（UTF-8）并发送
                         try:
-                            command_bytes = (line + '\n').encode('utf-8')
+                            # 确保编码为字节
+                            if isinstance(line, str):
+                                command_bytes = (line + '\n').encode('utf-8')
+                            else:
+                                command_bytes = line + b'\n'
+                            
                             self.server_process.stdin.write(command_bytes)
                             self.server_process.stdin.flush()
                             self.logger.debug(f"已发送命令到服务器: {line}")
+                        except BrokenPipeError:
+                            self.logger.error("服务器进程的stdin管道已断开")
+                            break
                         except Exception as e:
                             self.logger.error(f"发送命令到服务器失败: {e}")
+                            # 尝试重新连接或处理错误
+                            break
             except Exception as e:
                 self.logger.error(f"处理控制台输入失败: {e}")
                 break
@@ -879,6 +923,19 @@ class QQBotWebSocketServer:
             except Exception as e:
                 self.logger.error(f"关闭日志文件失败: {e}")
 
+    async def _process_server_log(self, log_line: str):
+        """处理服务器日志中的自定义监听规则"""
+        try:
+            if self.custom_listener and self.current_connection and not self.current_connection.closed:
+                await self.custom_listener.process_message(
+                    log_line=log_line,
+                    websocket=self.current_connection,
+                    group_ids=self.allowed_groups,
+                    server_executor=self._execute_server_command
+                )
+        except Exception as e:
+            self.logger.error(f"处理自定义监听规则失败: {e}", exc_info=True)
+
     def _store_server_log(self, log_line: str):
         """存储服务器日志到内存和文件"""
         import datetime
@@ -895,6 +952,13 @@ class QQBotWebSocketServer:
         # 写入到日志文件
         self._write_to_log_file(formatted_log)
         
+        # 处理自定义监听规则
+        if self.custom_listener:
+            try:
+                asyncio.create_task(self._process_server_log(log_line))
+            except Exception as e:
+                self.logger.error(f"创建日志处理任务失败: {e}")
+
         # 检查是否是区块监控消息
         if self.config_manager and self.config_manager.is_chunk_monitor_enabled():
             if self._is_chunk_monitor_message(log_line):

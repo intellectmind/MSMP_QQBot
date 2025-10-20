@@ -97,6 +97,10 @@ class ConfigManager:
                 'max_message_length': 2500,
                 'player_list_cache_ttl': 5
             },
+            'custom_listeners': {
+                'enabled': False,
+                'rules': []
+            },
             'debug': False
         }
     
@@ -104,12 +108,12 @@ class ConfigManager:
         """验证配置文件"""
         errors = []
         
-        # 检查至少启用一种连接方式
+        # 检查至少可用一种连接方式
         msmp_enabled = self.is_msmp_enabled()
         rcon_enabled = self.is_rcon_enabled()
         
         if not msmp_enabled and not rcon_enabled:
-            errors.append("必须至少启用MSMP或RCON其中一种连接方式")
+            errors.append("必须至少可用MSMP或RCON其中一种连接方式")
         
         # 验证MSMP配置(如果启用)
         if msmp_enabled:
@@ -168,11 +172,52 @@ class ConfigManager:
         # 验证服务器配置(如果配置了启动脚本)
         start_script = self.get_server_start_script()
         if start_script:
-            if not os.path.exists(start_script):
-                # 只是警告,不算错误
-                pass
-            elif not (start_script.endswith('.bat') or start_script.endswith('.sh')):
+            if not (start_script.endswith('.bat') or start_script.endswith('.sh')):
                 errors.append(f"服务器启动脚本格式不支持: {start_script}(仅支持.bat或.sh)")
+        
+        # 验证自定义监听器配置
+        listener_errors = self._validate_custom_listeners()
+        errors.extend(listener_errors)
+        
+        return errors
+    
+    def _validate_custom_listeners(self) -> List[str]:
+        """验证自定义监听器配置"""
+        errors = []
+        
+        if not self.is_custom_listeners_enabled():
+            return errors  # 未启用监听器，无需验证
+        
+        try:
+            rules = self.get_custom_listener_rules()
+            
+            if not rules:
+                return errors  # 没有规则配置
+            
+            for i, rule in enumerate(rules):
+                rule_errors = self._validate_listener_rule(rule, i)
+                errors.extend(rule_errors)
+            
+        except Exception as e:
+            errors.append(f"验证自定义监听器配置时出错: {e}")
+        
+        return errors
+    
+    def _validate_listener_rule(self, rule: Dict, index: int) -> List[str]:
+        """验证单个监听器规则"""
+        errors = []
+        
+        # 检查必需字段
+        rule_name = rule.get('name', f'rule_{index}')
+        
+        if not rule.get('pattern'):
+            errors.append(f"监听规则 '{rule_name}' 的 pattern 不能为空")
+        
+        qq_message = rule.get('qq_message', '')
+        server_command = rule.get('server_command', '')
+        
+        if not qq_message and not server_command:
+            errors.append(f"监听规则 '{rule_name}' 的 qq_message 和 server_command 不能同时为空")
         
         return errors
     
@@ -183,7 +228,7 @@ class ConfigManager:
         if errors:
             raise ConfigValidationError("配置验证失败:\n" + "\n".join(f"  - {e}" for e in errors))
     
-    # MSMP配置
+    # ============ MSMP配置 ============
     def is_msmp_enabled(self) -> bool:
         return self.config.get('msmp', {}).get('enabled', True)
     
@@ -196,7 +241,7 @@ class ConfigManager:
     def get_msmp_password(self) -> str:
         return self.config.get('msmp', {}).get('password', '')
     
-    # RCON配置
+    # ============ RCON配置 ============
     def is_rcon_enabled(self) -> bool:
         return self.config.get('rcon', {}).get('enabled', False)
     
@@ -209,7 +254,7 @@ class ConfigManager:
     def get_rcon_password(self) -> str:
         return self.config.get('rcon', {}).get('password', '')
     
-    # WebSocket配置
+    # ============ WebSocket配置 ============
     def get_ws_port(self) -> int:
         return self.config.get('websocket', {}).get('port', 8080)
     
@@ -219,7 +264,7 @@ class ConfigManager:
     def is_websocket_auth_enabled(self) -> bool:
         return self.config.get('websocket', {}).get('auth_enabled', False)
     
-    # QQ群配置
+    # ============ QQ群配置 ============
     def get_qq_groups(self) -> List[int]:
         return self.config.get('qq', {}).get('groups', [])
     
@@ -238,7 +283,7 @@ class ConfigManager:
     def is_log_messages_enabled(self) -> bool:
         return self.config.get('notifications', {}).get('log_messages', False)
     
-    # 服务器配置
+    # ============ 服务器配置 ============
     def get_server_start_script(self) -> str:
         return self.config.get('server', {}).get('start_script', '')
     
@@ -248,19 +293,18 @@ class ConfigManager:
     def get_server_startup_timeout(self) -> int:
         return self.config.get('server', {}).get('startup_timeout', 300)
     
-    # 命令配置
+    # ============ 命令配置 ============
     def get_tps_command(self) -> str:
         """获取TPS命令配置"""
         return self.config.get('commands', {}).get('tps_command', 'tps')
     
     def is_command_enabled(self, command_name: str) -> bool:
-        """检查命令是否启用"""
+        """检查命令是否可用"""
         enabled_commands = self.config.get('commands', {}).get('enabled_commands', {})
-        # 默认所有命令都启用
         return enabled_commands.get(command_name, True)
     
     def get_enabled_commands(self) -> Dict[str, bool]:
-        """获取所有命令的启用状态"""
+        """获取所有命令的可用状态"""
         return self.config.get('commands', {}).get('enabled_commands', {
             'list': True,
             'tps': True,
@@ -269,14 +313,14 @@ class ConfigManager:
             'help': True
         })
     
-    # 通知配置
+    # ============ 通知配置 ============
     def is_server_event_notify_enabled(self) -> bool:
         return self.config.get('notifications', {}).get('server_events', True)
     
     def is_player_event_notify_enabled(self) -> bool:
         return self.config.get('notifications', {}).get('player_events', True)
-        
-    # 区块监控配置
+    
+    # ============ 区块监控配置 ============
     def get_chunk_monitor_config(self) -> Dict[str, bool]:
         """获取区块监控配置"""
         return self.config.get('notifications', {}).get('chunk_monitor', {
@@ -286,7 +330,7 @@ class ConfigManager:
         })
 
     def is_chunk_monitor_enabled(self) -> bool:
-        """检查区块监控通知是否启用"""
+        """检查区块监控通知是否可用"""
         return self.get_chunk_monitor_config().get('enabled', False)
 
     def should_notify_admins_on_chunk_monitor(self) -> bool:
@@ -296,8 +340,8 @@ class ConfigManager:
     def should_notify_groups_on_chunk_monitor(self) -> bool:
         """检查是否向QQ群发送区块监控通知"""
         return self.get_chunk_monitor_config().get('notify_groups', True)
-        
-    # 高级配置
+    
+    # ============ 高级配置 ============
     def get_reconnect_interval(self) -> int:
         return self.config.get('advanced', {}).get('reconnect_interval', 300)
     
@@ -310,7 +354,63 @@ class ConfigManager:
     def get_max_message_length(self) -> int:
         return self.config.get('advanced', {}).get('max_message_length', 500)
     
-    # 其他配置
+    # ============ 自定义监听器配置 ============
+    def is_custom_listeners_enabled(self) -> bool:
+        """检查自定义监听器是否启用"""
+        return self.config.get('custom_listeners', {}).get('enabled', False)
+    
+    def get_custom_listener_rules(self) -> List[Dict]:
+        """获取所有自定义监听器规则"""
+        return self.config.get('custom_listeners', {}).get('rules', [])
+    
+    def get_custom_listener_rule(self, rule_name: str) -> Optional[Dict]:
+        """获取指定名称的监听器规则"""
+        rules = self.get_custom_listener_rules()
+        for rule in rules:
+            if rule.get('name') == rule_name:
+                return rule
+        return None
+    
+    def add_custom_listener_rule(self, rule: Dict):
+        """添加新的监听器规则"""
+        if 'custom_listeners' not in self.config:
+            self.config['custom_listeners'] = {'enabled': False, 'rules': []}
+        
+        if 'rules' not in self.config['custom_listeners']:
+            self.config['custom_listeners']['rules'] = []
+        
+        self.config['custom_listeners']['rules'].append(rule)
+        self.save_config()
+    
+    def remove_custom_listener_rule(self, rule_name: str) -> bool:
+        """移除指定名称的监听器规则"""
+        rules = self.get_custom_listener_rules()
+        
+        for i, rule in enumerate(rules):
+            if rule.get('name') == rule_name:
+                rules.pop(i)
+                self.save_config()
+                return True
+        
+        return False
+    
+    def enable_custom_listeners(self):
+        """启用自定义监听器"""
+        if 'custom_listeners' not in self.config:
+            self.config['custom_listeners'] = {'enabled': True, 'rules': []}
+        else:
+            self.config['custom_listeners']['enabled'] = True
+        self.save_config()
+    
+    def disable_custom_listeners(self):
+        """禁用自定义监听器"""
+        if 'custom_listeners' not in self.config:
+            self.config['custom_listeners'] = {'enabled': False, 'rules': []}
+        else:
+            self.config['custom_listeners']['enabled'] = False
+        self.save_config()
+    
+    # ============ 其他配置 ============
     def is_debug_mode(self) -> bool:
         return self.config.get('debug', False)
     

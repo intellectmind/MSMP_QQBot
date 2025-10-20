@@ -101,3 +101,320 @@ advanced:
 
 # 调试模式
 debug: false
+
+# ============================================================
+# 自定义服务端消息监听规则配置
+# ============================================================
+# 这个功能允许你通过正则表达式监听服务器日志
+# 匹配成功时可以向QQ群发送消息或向服务端执行指令
+
+custom_listeners:
+  # 是否启用自定义监听功能
+  enabled: false
+  
+  # 监听规则列表 - 可以添加无限个规则 
+  rules:
+    # 示例1: 玩家加入游戏的高级通知
+    - name: "player_join_advanced"
+      description: "玩家加入游戏时发送智能通知"
+      enabled: true
+      pattern: "(\\w+) joined the game"
+      case_sensitive: false
+      trigger_limit: 10  # 最多触发10次
+      trigger_cooldown: 60  # 60秒冷却
+      conditions:
+        - type: "time_range"
+          params:
+            start: "08:00"
+            end: "23:00"
+        - type: "player_online"
+          params:
+            require: false  # 无论是否有其他玩家在线都触发
+      qq_message: |
+        玩家 {upper(group1)} 加入了游戏！
+        服务器状态: TPS {server_tps} | 在线: {player_count}人
+        时间: {time} | 规则: {rule_name}
+        今日第 {match_count} 次玩家加入
+      server_command: "say 欢迎 {upper(group1)} 加入游戏！当前在线: {player_count} 人"
+
+    # 示例2: 服务器错误监控
+    - name: "error_monitor"
+      description: "监控服务器错误并通知管理员"
+      enabled: true
+      pattern: "\\[ERROR\\].*?(Exception|Error|Crash|Failed)"
+      case_sensitive: false
+      trigger_limit: 5  # 最多触发5次
+      trigger_cooldown: 300  # 5分钟冷却
+      conditions:
+        - type: "server_tps"
+          params:
+            min_tps: 5  # 只在TPS低于5时通知
+            max_tps: 20
+      qq_message: |
+        服务器错误告警！
+        错误内容: {substr(match, 0, 100)}
+        发生时间: {timestamp}
+        当前TPS: {server_tps}
+        内存使用: {memory_usage}%
+        在线玩家: {player_count}人
+        {if(player_count > 0, '有玩家在线，请及时处理！', '暂无玩家在线')}
+      server_command: "say 检测到服务器错误，请查看控制台日志"
+
+    # 示例3: 玩家聊天关键词监控
+    - name: "chat_keyword_alert"
+      description: "监控玩家聊天中的关键词"
+      enabled: true
+      pattern: "<(\\w+)>.*?(作弊|外挂|bug|漏洞|hack|cheat)"
+      case_sensitive: false
+      trigger_cooldown: 30  # 30秒冷却
+      qq_message: |
+        聊天关键词告警
+        玩家: {group1}
+        内容: {substr(match, 0, 50)}
+        关键词: {lower(replace(match, '.*?(作弊|外挂|bug|漏洞|hack|cheat).*', '$1'))}
+        时间: {time}
+        {if(contains(lower(group1), 'admin') or contains(lower(group1), 'op'), '发言者是管理员', '请关注此玩家')}
+      server_command: ""
+
+    # 示例4: 服务器性能告警
+    - name: "performance_alert"
+      description: "服务器性能下降告警"
+      enabled: true
+      pattern: "Can't keep up!.*"
+      case_sensitive: false
+      trigger_limit: 3
+      trigger_cooldown: 600  # 10分钟冷却
+      conditions:
+        - type: "memory_usage"
+          params:
+            max_usage: 90  # 内存使用超过90%时才告警
+      qq_message: |
+        服务器性能告警！
+        问题: {match}
+        时间: {timestamp}
+        当前状态:
+          TPS: {server_tps}
+          内存: {memory_usage}%
+          玩家: {player_count}人
+        建议: {if(memory_usage > 80, '考虑重启释放内存', '检查插件性能')}
+      server_command: "save-all"
+
+    # 示例5: 玩家死亡通知
+    - name: "player_death_smart"
+      description: "玩家死亡时发送智能通知"
+      enabled: true
+      pattern: "(\\w+) (was slain by|was shot by|fell|drowned|burned|blown up|died)"
+      case_sensitive: false
+      trigger_cooldown: 10
+      qq_message: |
+        玩家死亡事件
+        玩家: {group1}
+        原因: {replace(match, '^\\w+ ', '')}
+        时间: {time}
+        统计: 今日第 {match_count} 次死亡
+        {if(contains(match, 'slain') or contains(match, 'shot'), 'PVP事件', '环境死亡')}
+      server_command: ""
+
+# ============================================================
+# 规则配置说明
+# ============================================================
+#
+# 基础规则参数解释：
+#   name          - 规则唯一标识符（用于日志记录和管理）
+#   description   - 规则的详细描述
+#   enabled       - 是否启用此规则 (true/false)
+#   pattern       - Python正则表达式
+#   qq_message    - 匹配时向QQ群发送的消息
+#   server_command- 匹配时向服务端执行的指令
+#
+# 高级规则参数解释：
+#   case_sensitive - 是否大小写敏感 (默认: false)
+#   trigger_limit  - 触发次数限制 (0=无限制, 默认: 0)
+#   trigger_cooldown - 冷却时间(秒) (0=无冷却, 默认: 0)
+#   conditions     - 执行条件列表 (详见条件配置说明)
+#
+# 限制说明：
+#   - qq_message 和 server_command 至少需要配置一个（不能同时为空）
+#   - pattern 是必需的，且必须是有效的正则表达式
+#   - 支持无限个规则
+#
+# ============================================================
+# 占位符系统说明
+# ============================================================
+#
+# 基础占位符（在消息和指令中使用）：
+#   {match}        - 完整匹配内容
+#   {group1}       - 正则中第1个 (...) 捕获的内容
+#   {group2}       - 正则中第2个 (...) 捕获的内容
+#   {group3}       - 依此类推...
+#   {match_full}   - 同 {match}
+#
+# 系统信息占位符：
+#   {timestamp}    - 当前完整时间 (格式: YYYY-MM-DD HH:MM:SS)
+#   {date}         - 当前日期 (格式: YYYY-MM-DD)
+#   {time}         - 当前时间 (格式: HH:MM:SS)
+#   {server_tps}   - 服务器TPS (每秒刻数)
+#   {player_count} - 在线玩家数量
+#   {memory_usage} - 内存使用率百分比
+#   {rule_name}    - 当前规则名称
+#   {match_count}  - 该规则的总匹配次数
+#   {prev_match_time} - 上次匹配时间
+#
+# 函数式占位符（支持嵌套和复杂逻辑）：
+#   {upper(text)}              - 将文本转换为大写
+#   {lower(text)}              - 将文本转换为小写
+#   {substr(text, start, end)} - 截取文本子串 (从start到end)
+#   {repeat(text, count)}      - 重复文本指定次数
+#   {replace(text, old, new)}  - 替换文本中的内容
+#   {length(text)}             - 获取文本长度
+#   {trim(text)}               - 去除文本首尾空格
+#   {contains(text, substr)}   - 检查文本是否包含子串
+#   {startsWith(text, prefix)} - 检查文本是否以指定前缀开头
+#   {endsWith(text, suffix)}   - 检查文本是否以指定后缀结尾
+#   {if(cond, true, false)}    - 条件判断 (cond为真返回true，否则返回false)
+#
+# 函数式占位符参数说明：
+#   - 参数可以是字符串（用引号包围）、数字或变量名
+#   - 变量名包括: match, group1, group2..., 以及所有系统信息占位符
+#   - 支持嵌套函数调用
+#
+# ============================================================
+# 条件配置说明
+# ============================================================
+#
+# conditions 字段配置格式：
+#   conditions:
+#     - type: "条件类型"
+#       params:
+#         参数1: 值1
+#         参数2: 值2
+#
+# 支持的条件类型：
+#
+# 1. 时间范围条件 (time_range)
+#   作用: 只在指定时间范围内触发规则
+#   参数:
+#     start: "HH:MM"  # 开始时间 (24小时制)
+#     end: "HH:MM"    # 结束时间 (24小时制)
+#   示例:
+#     - type: "time_range"
+#       params:
+#         start: "08:00"
+#         end: "22:00"
+#
+# 2. 玩家在线条件 (player_online)
+#   作用: 根据玩家在线状态决定是否触发
+#   参数:
+#     require: true/false  # true=需要玩家在线, false=需要无玩家在线
+#   示例:
+#     - type: "player_online"
+#       params:
+#         require: true
+#
+# 3. 服务器TPS条件 (server_tps)
+#   作用: 根据服务器TPS性能决定是否触发
+#   参数:
+#     min_tps: 数值  # 最小TPS值
+#     max_tps: 数值  # 最大TPS值
+#   示例:
+#     - type: "server_tps"
+#       params:
+#         min_tps: 10.0
+#         max_tps: 20.0
+#
+# 4. 内存使用条件 (memory_usage)
+#   作用: 根据内存使用率决定是否触发
+#   参数:
+#     max_usage: 数值  # 最大内存使用率百分比
+#   示例:
+#     - type: "memory_usage"
+#       params:
+#         max_usage: 80.0
+#
+# 5. 自定义函数条件 (custom_function)
+#   作用: 通过自定义Python函数决定是否触发
+#   参数: 根据具体函数定义
+#   示例:
+#     - type: "custom_function"
+#       params:
+#         function_name: "my_custom_check"
+#         some_parameter: "some_value"
+#
+# ============================================================
+# 正则表达式说明
+# ============================================================
+#
+# 常用元字符：
+#   \\w         - 单词字符 [a-zA-Z0-9_]
+#   \\d         - 数字 [0-9]
+#   \\s         - 空白字符 (空格、制表符、换行等)
+#   \\S         - 非空白字符
+#   .           - 任意单个字符 (除了换行符)
+#   .*          - 任意字符序列 (0个或多个)
+#   .+          - 任意字符序列 (1个或多个)
+#   .?          - 任意字符序列 (0个或1个)
+#
+# 分组和捕获：
+#   (...)       - 捕获分组 (可在占位符中使用 {group1} 等引用)
+#   (?:...)     - 非捕获分组 (不保存匹配内容)
+#   |           - 或关系
+#
+# 数量限定：
+#   *           - 0次或多次
+#   +           - 1次或多次
+#   ?           - 0次或1次
+#   {n}         - 恰好n次
+#   {n,}        - 至少n次
+#   {n,m}       - n到m次
+#
+# 边界匹配：
+#   ^           - 字符串开始
+#   $           - 字符串结束
+#   \\b         - 单词边界
+#
+# 字符转义：
+#   \\[         - 转义 [ 字符
+#   \\(         - 转义 ( 字符
+#   \\.         - 转义 . 字符
+#   \\*         - 转义 * 字符
+#   \\+         - 转义 + 字符
+#   \\?         - 转义 ? 字符
+#   \\^         - 转义 ^ 字符
+#   \\$         - 转义 $ 字符
+#
+# ============================================================
+# 调试建议
+# ============================================================
+#
+# 1. 正则表达式调试：
+#    - 先用较宽松的正则测试（如 ".*pattern.*"）
+#    - 逐步精确正则表达式的匹配范围
+#    - 在服务器日志文件中查看实际的日志格式
+#    - 使用在线正则表达式测试工具验证（如 regex101.com）
+#
+# 2. 占位符调试：
+#    - 先用简单占位符测试（如 {match}）
+#    - 逐步添加复杂占位符和函数调用
+#    - 检查占位符替换是否正确
+#
+# 3. 条件调试：
+#    - 先不使用条件测试规则是否匹配
+#    - 逐个添加条件测试效果
+#    - 检查条件参数是否正确
+#
+# 4. 性能优化：
+#    - 避免使用过于复杂的正则表达式
+#    - 合理设置 trigger_limit 和 trigger_cooldown
+#    - 使用非捕获分组 (?:...) 提高性能
+#
+# 5. 日志分析：
+#    - 启用 debug: true 查看详细匹配过程
+#    - 检查规则统计信息了解匹配频率
+#    - 监控系统性能确保不会影响服务器运行
+#
+# 6. 安全考虑：
+#    - 避免在 server_command 中使用不受信任的输入
+#    - 对用户输入进行适当的转义处理
+#    - 设置合理的触发限制防止滥用
+#
+# ============================================================

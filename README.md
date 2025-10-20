@@ -6,11 +6,7 @@
 
 ## 使用说明
 #### 启动方式1：独立启动我的世界服务端后启动MSMP_QQBot（即外部接入）
-#### 启动方式2（推荐）：使用QQ机器人（start命令）启动服务端，此时MSMP_QQBot控制台会捕获服务端控制台输出，并且仍然支持向服务端输入命令  
-    QQBot控制台命令:
-      status  - 显示连接状态
-      exit    - 停止MSMP_QQBot服务
-      其他命令将直接发送到Minecraft服务器  
+#### 启动方式2（推荐）：使用`#start`命令启动或者使用QQ机器人（start命令）启动服务端，此时MSMP_QQBot控制台会捕获服务端控制台输出，并且仍然支持向服务端输入命令  
       
 #### window用户：直接下载`releases`中的exe文件，双击运行即可  
 #### Linux等其它用户可下载源代码运行  
@@ -18,6 +14,8 @@
 ----------------------------------------------------------------------------------------------------------
 
 ## 命令说明
+
+### QQ命令
 
 注：管理员支持私聊使用所有命令，无管理员权限则只支持群内  
 
@@ -56,11 +54,54 @@
   查看Java进程运行信息  
 • network / 网络 / /network  
   查看网络信息和实时带宽速度  
+• listeners / 监听规则 / /listeners  
+  查看所有自定义消息监听规则  
 
 直接命令执行:  
 • !<命令>  
   管理员可使用 ! 前缀直接执行服务器命令,需启用RCON  
   示例: !say Hello 或 !give @a diamond  
+
+### MSMP_QQBot控制台命令
+
+    控制台命令帮助 (使用 # 前缀)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    系统命令 (#前缀):
+      #status       - 查看连接状态
+      #reload       - 重新加载配置
+      #logs         - 显示日志文件信息
+      #help         - 显示此帮助
+      #exit         - 退出程序
+
+    服务器管理命令 (#前缀):
+      #start        - 启动Minecraft服务器
+      #stop         - 停止Minecraft服务器
+      #server_status - 查看服务器进程状态
+
+    服务器查询命令 (#前缀):
+      #list         - 查看在线玩家
+      #tps          - 查看服务器TPS
+      #rules        - 查看服务器规则
+      #sysinfo      - 查看系统信息
+      #disk         - 查看磁盘信息  
+      #process      - 查看Java进程
+      #network      - 查看网络信息
+
+    管理命令 (#前缀):
+      #listeners    - 查看监听规则
+      #reconnect    - 重连所有服务
+      #reconnect_msmp - 重连MSMP
+      #reconnect_rcon - 重连RCON
+
+    服务器命令 (无前缀):
+      直接输入任意命令将转发到Minecraft服务器
+      例如: list 或 say Hello
+
+    提示:
+      - 带 # 前缀的命令由MSMP系统处理
+      - 无前缀的命令直接转发到Minecraft服务器
+      - start/stop 命令现在支持控制台直接使用
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ----------------------------------------------------------------------------------------------------------
 
@@ -174,6 +215,40 @@ advanced:
 
 # 调试模式
 debug: false
+
+# ============================================================
+# 自定义服务端消息监听规则配置
+# ============================================================
+# 这个功能允许你通过正则表达式监听服务器日志
+# 匹配成功时可以向QQ群发送消息或向服务端执行指令
+custom_listeners:
+  # 是否启用自定义监听功能
+  enabled: false
+  
+  # 监听规则列表 - 可以添加无限个规则 
+  rules:
+    # 示例: 玩家加入游戏的高级通知
+    - name: "player_join_advanced"
+      description: "玩家加入游戏时发送智能通知"
+      enabled: true
+      pattern: "(\\w+) joined the game"
+      case_sensitive: false
+      trigger_limit: 10  # 最多触发10次
+      trigger_cooldown: 60  # 60秒冷却
+      conditions:
+        - type: "time_range"
+          params:
+            start: "08:00"
+            end: "23:00"
+        - type: "player_online"
+          params:
+            require: false  # 无论是否有其他玩家在线都触发
+      qq_message: |
+        玩家 {upper(group1)} 加入了游戏！
+        服务器状态: TPS {server_tps} | 在线: {player_count}人
+        时间: {time} | 规则: {rule_name}
+        今日第 {match_count} 次玩家加入
+      server_command: "say 欢迎 {upper(group1)} 加入游戏！当前在线: {player_count} 人"
 ```
 
 ----------------------------------------------------------------------------------------------------------

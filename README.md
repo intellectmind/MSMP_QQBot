@@ -64,44 +64,61 @@
 
 ### MSMP_QQBot控制台命令
 
-    控制台命令帮助 (使用 # 前缀)
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    系统命令 (#前缀):
-      #status       - 查看连接状态
-      #reload       - 重新加载配置
-      #logs         - 显示日志文件信息
-      #help         - 显示此帮助
-      #exit         - 退出程序
+========== MSMP_QQBot 控制台命令帮助 ==========
 
-    服务器管理命令 (#前缀):
-      #start        - 启动Minecraft服务器
-      #stop         - 停止Minecraft服务器
-      #server_status - 查看服务器进程状态
+系统命令 (使用 # 前缀):
+  #status          - 查看系统连接状态
+  #reload          - 重新加载配置文件
+  #logs            - 显示日志文件信息
+  #help            - 显示此帮助信息
+  #exit            - 退出程序
+  #logstats        - 查看日志系统统计信息
 
-    服务器查询命令 (#前缀):
-      #list         - 查看在线玩家
-      #tps          - 查看服务器TPS
-      #rules        - 查看服务器规则
-      #sysinfo      - 查看系统信息
-      #disk         - 查看磁盘信息  
-      #process      - 查看Java进程
-      #network      - 查看网络信息
+日志开关命令 (使用 # 前缀):
+  #toggle_mc_log   - 开启/禁用 MC服务端日志输出
+  #toggle_bot_log  - 开启/禁用 MSMP_QQBot日志输出
+  #log_status      - 显示日志开关状态
+  #mute_log <关键词>   - 禁用包含指定关键词的日志
+  #unmute_log <关键词> - 启用包含指定关键词的日志
 
-    管理命令 (#前缀):
-      #listeners    - 查看监听规则
-      #reconnect    - 重连所有服务
-      #reconnect_msmp - 重连MSMP
-      #reconnect_rcon - 重连RCON
+服务器管理命令 (使用 # 前缀):
+  #start           - 启动Minecraft服务器
+  #stop            - 停止Minecraft服务器
+  #server_status   - 查看服务器进程状态
 
-    服务器命令 (无前缀):
-      直接输入任意命令将转发到Minecraft服务器
-      例如: list 或 say Hello
+服务器查询命令 (使用 # 前缀):
+  #list            - 查看在线玩家列表
+  #tps             - 查看服务器TPS性能
+  #rules           - 查看服务器游戏规则
 
-    提示:
-      - 带 # 前缀的命令由MSMP系统处理
-      - 无前缀的命令直接转发到Minecraft服务器
-      - start/stop 命令现在支持控制台直接使用
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+系统监控命令 (使用 # 前缀):
+  #sysinfo         - 查看系统信息 (CPU、内存、硬盘、网络)
+  #disk            - 查看硬盘使用情况
+  #process         - 查看Java进程信息
+  #network         - 查看网络信息和实时带宽
+
+连接管理命令 (使用 # 前缀):
+  #reconnect       - 重新连接所有服务 (MSMP和RCON)
+  #reconnect_msmp  - 重新连接MSMP
+  #reconnect_rcon  - 重新连接RCON
+
+其他命令 (使用 # 前缀):
+  #listeners       - 查看自定义消息监听规则
+
+Minecraft命令 (无 # 前缀):
+  直接输入任意Minecraft命令将转发到服务器
+  示例: list
+        say Hello everyone!
+        give @a diamond
+
+日志开关示例:
+  #toggle_mc_log   - 禁用MC服务端日志
+  #toggle_bot_log  - 禁用Bot日志
+  #log_status      - 查看所有日志状态
+  #mute_log ERROR  - 禁用包含 ERROR 的日志
+  #unmute_log ERROR - 启用包含 ERROR 的日志
+
+================================================
 
 ----------------------------------------------------------------------------------------------------------
 

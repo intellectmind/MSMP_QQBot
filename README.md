@@ -19,48 +19,50 @@
 
 注：管理员支持私聊使用所有命令，无管理员权限则只支持群内  
 
-基础命令:  
-• list / 在线列表 / 玩家列表  
-  查看在线玩家列表  
-• tps / /tps / 服务器tps  
-  查看服务器TPS(每秒刻数)性能  
-• rules / 规则 / /rules  
-  查看服务器游戏规则和设置  
-• status / 状态 / /status  
-  查看服务器状态  
-• help / 帮助 / /help  
-  显示帮助信息  
+```
+基础命令:
+• list / 在线列表 / 玩家列表
+  查看在线玩家列表
+• tps / /tps / 服务器tps
+  查看服务器TPS(每秒刻数)性能
+• rules / 规则 / /rules
+  查看服务器游戏规则和设置
+• status / 状态 / /status
+  查看服务器状态
+• help / 帮助 / /help
+  显示帮助信息
 
-管理员命令:  
-• stop / 停止 / 关服  
-  停止Minecraft服务器  
-• start / 启动 / 开服  
-  启动Minecraft服务器  
-• reload / 重载 / /reload  
-  重新加载配置文件  
-• log / 日志 / /log  
-  查看最近20条的服务器日志  
-• reconnect / 重连 / /reconnect  
-  重新连接所有服务(MSMP和RCON)  
-• reconnect_msmp / 重连msmp / /reconnect_msmp  
-  重新连接MSMP服务  
-• reconnect_rcon / 重连rcon / /reconnect_rcon  
-  重新连接RCON服务  
-• sysinfo / 系统信息 / /sysinfo  
-  查看服务器系统信息(CPU、内存、硬盘、网络)  
-• disk / 硬盘 / /disk  
-  查看服务器硬盘详细使用情况  
-• process / 进程 / /process  
-  查看Java进程运行信息  
-• network / 网络 / /network  
-  查看网络信息和实时带宽速度  
-• listeners / 监听规则 / /listeners  
-  查看所有自定义消息监听规则  
+管理员命令:
+• stop / 停止 / 关闭
+  停止Minecraft服务器
+• start / 启动 / 开启
+  启动Minecraft服务器
+• reload / 重载 / /reload
+  重新加载配置文件
+• log / 日志 / /log
+  查看最近20条的服务器日志
+• reconnect / 重连 / /reconnect
+  重新连接所有服务(MSMP和RCON)
+• reconnect_msmp / 重连msmp / /reconnect_msmp
+  重新连接MSMP服务
+• reconnect_rcon / 重连rcon / /reconnect_rcon
+  重新连接RCON服务
+• sysinfo / 系统信息 / /sysinfo
+  查看服务器系统信息(CPU、内存、硬盘、网络)
+• disk / 硬盘 / /disk
+  查看服务器硬盘详细使用情况
+• process / 进程 / /process
+  查看Java进程运行信息
+• network / 网络 / /network
+  查看网络信息和实时带宽速度
+• listeners / 监听规则 / /listeners
+  查看所有自定义消息监听规则
 
-直接命令执行:  
-• !<命令>  
-  管理员可使用 ! 前缀直接执行服务器命令,需启用RCON  
-  示例: !say Hello 或 !give @a diamond  
+直接命令执行:
+• !<命令>
+  管理员可使用 ! 前缀直接执行服务器命令,需启用RCON
+  示例: !say Hello 或 !give @a diamond
+```
 
 ### MSMP_QQBot控制台命令
 

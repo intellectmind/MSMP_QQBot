@@ -7,6 +7,43 @@ from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
+import json
+from pathlib import Path
+
+class RuleStatsPersistence:
+    def __init__(self, stats_file: str = "logs/rule_stats.json"):
+        self.stats_file = stats_file
+        Path(stats_file).parent.mkdir(exist_ok=True)
+    
+    def load_stats(self) -> Dict[str, Dict]:
+        """加载规则统计数据"""
+        try:
+            if os.path.exists(self.stats_file):
+                with open(self.stats_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"加载规则统计失败: {e}")
+        return {}
+    
+    def save_stats(self, stats: Dict[str, Dict]):
+        """保存规则统计数据"""
+        try:
+            with open(self.stats_file, 'w', encoding='utf-8') as f:
+                json.dump(stats, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"保存规则统计失败: {e}")
+
+    def save_rule_history(self, rule_name: str, history: TriggerHistory):
+        """保存单个规则的历史数据"""
+        stats = self.load_stats()
+        stats[rule_name] = {
+            'match_count': history.match_count,
+            'last_match_time': history.last_match_time,
+            'last_trigger_time': history.last_trigger_time,
+            'trigger_times_today': history.trigger_times_today,
+            'last_reset_date': history.last_reset_date
+        }
+        self.save_stats(stats)
 
 
 class ConditionType(Enum):
@@ -37,8 +74,8 @@ class TriggerHistory:
     match_count: int = 0
     last_match_time: float = 0
     last_trigger_time: float = 0
-    trigger_times_today: int = 0  # 今天触发次数
-    last_reset_date: str = ""  # 最后一次重置的日期
+    trigger_times_today: int = 0 
+    last_reset_date: str = ""
 
 
 class ListenerRule:
@@ -237,9 +274,8 @@ class ListenerRule:
         """检查自定义函数条件"""
         return True
     
-    def update_history(self, triggered: bool = True):
+    def update_history(self, triggered: bool = True, persistence=None):
         """更新触发历史"""
-        # 检查是否需要重置每日计数
         today = datetime.date.today().isoformat()
         if today != self.history.last_reset_date:
             self.history.trigger_times_today = 0
@@ -250,7 +286,11 @@ class ListenerRule:
         
         if triggered:
             self.history.last_trigger_time = time.time()
-            self.history.trigger_times_today += 1  # 先增加计数，再使用
+            self.history.trigger_times_today += 1
+        
+        # 持久化保存
+        if persistence:
+            persistence.save_rule_history(self.name, self.history)
     
     def format_message(self, 
                       match: re.Match, 
@@ -418,6 +458,7 @@ class CustomMessageListener:
         self.rule_stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"total": 0, "errors": 0})
         
         self._register_default_context_providers()
+        self.persistence = RuleStatsPersistence()
         self._load_rules_from_config()
     
     def _register_default_context_providers(self):
@@ -474,6 +515,17 @@ class CustomMessageListener:
             
             self.rules = new_rules
             self.logger.info(f"共加载 {len(self.rules)} 个自定义监听规则")
+
+            # 恢复历史数据
+            saved_stats = self.persistence.load_stats()
+            for rule in self.rules:
+                if rule.name in saved_stats:
+                    stats = saved_stats[rule.name]
+                    rule.history.match_count = stats.get('match_count', 0)
+                    rule.history.last_match_time = stats.get('last_match_time', 0)
+                    rule.history.last_trigger_time = stats.get('last_trigger_time', 0)
+                    rule.history.trigger_times_today = stats.get('trigger_times_today', 0)
+                    rule.history.last_reset_date = stats.get('last_reset_date', '')
             
         except Exception as e:
             self.logger.error(f"加载自定义监听规则失败: {e}", exc_info=True)

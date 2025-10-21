@@ -2,7 +2,7 @@
 
 支持我的世界1.21.9+新加入的服务端管理协议MSMP和RCON的QQ机器人（1.21.9以下版本可单独使用RCON）。支持QQ启动/停止服务器，查询在线人数及玩家ID、服务器状态、执行命令等功能
 
-拥有强大的自定义服务端日志监听器，详见(wiki)[https://github.com/intellectmind/MSMP_QQBot/wiki/custom_listeners]
+拥有强大的自定义服务端日志监听器，详见[wiki](https://github.com/intellectmind/MSMP_QQBot/wiki/custom_listeners)
 
 ----------------------------------------------------------------------------------------------------------
 

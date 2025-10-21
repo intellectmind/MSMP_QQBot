@@ -1,6 +1,12 @@
 import yaml
 import os
-from typing import List, Dict, Optional
+import re
+import threading
+import time
+import logging
+import hashlib
+from typing import List, Dict, Optional, Callable, Any
+from pathlib import Path
 
 class ConfigValidationError(Exception):
     """配置验证错误"""
@@ -11,10 +17,87 @@ class ConfigManager:
         self.config_path = config_path
         self.config = {}
         self.load_config()
+        
         # 验证配置
         errors = self.validate_config()
         if errors:
             raise ConfigValidationError("配置验证失败:\n" + "\n".join(f"  - {e}" for e in errors))
+        
+        # 配置热重载相关
+        self._reload_callbacks: List[Callable] = []
+        self._file_monitor_thread: Optional[threading.Thread] = None
+        self._stop_monitor = False
+        self._last_config_hash = self._get_config_hash()
+        self._reload_lock = threading.RLock()
+        self.logger = logging.getLogger(__name__)
+    
+    def _get_config_hash(self) -> str:
+        """获取配置文件的哈希值，用于检测文件变化"""
+        try:
+            with open(self.config_path, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
+        except Exception:
+            return ""
+    
+    def register_reload_callback(self, callback: Callable):
+        """注册配置重载回调函数
+        
+        Args:
+            callback: 可以是同步或异步函数，签名: func(old_config: dict, new_config: dict)
+        """
+        if callback not in self._reload_callbacks:
+            self._reload_callbacks.append(callback)
+            self.logger.debug(f"已注册配置重载回调: {callback.__name__}")
+    
+    def unregister_reload_callback(self, callback: Callable):
+        """注销配置重载回调函数"""
+        if callback in self._reload_callbacks:
+            self._reload_callbacks.remove(callback)
+            self.logger.debug(f"已注销配置重载回调: {callback.__name__}")
+    
+    def start_file_monitor(self, check_interval: int = 2):
+        """启动配置文件监控线程
+        
+        Args:
+            check_interval: 检查间隔（秒），默认2秒
+        """
+        if self._file_monitor_thread and self._file_monitor_thread.is_alive():
+            self.logger.warning("配置监控线程已在运行")
+            return
+        
+        self._stop_monitor = False
+        self._file_monitor_thread = threading.Thread(
+            target=self._monitor_config_file,
+            args=(check_interval,),
+            daemon=True,
+            name="ConfigMonitor"
+        )
+        self._file_monitor_thread.start()
+        self.logger.info(f"配置文件监控已启动 (检查间隔: {check_interval}秒)")
+    
+    def stop_file_monitor(self):
+        """停止配置文件监控"""
+        self._stop_monitor = True
+        if self._file_monitor_thread and self._file_monitor_thread.is_alive():
+            self._file_monitor_thread.join(timeout=5)
+            self.logger.info("配置文件监控已停止")
+    
+    def _monitor_config_file(self, check_interval: int):
+        """监控配置文件变化的线程函数"""
+        while not self._stop_monitor:
+            try:
+                current_hash = self._get_config_hash()
+                if current_hash and current_hash != self._last_config_hash:
+                    self.logger.info("检测到配置文件变化，准备重载...")
+                    if self.reload():
+                        self.logger.info("配置已成功重载")
+                    else:
+                        self.logger.error("配置重载失败，已恢复为上一个版本")
+                
+                time.sleep(check_interval)
+            except Exception as e:
+                self.logger.error(f"配置监控线程出错: {e}")
+                time.sleep(check_interval)
     
     def load_config(self):
         """加载配置文件"""
@@ -27,7 +110,6 @@ class ConfigManager:
             except Exception as e:
                 raise ConfigValidationError(f"读取配置文件失败: {e}")
         else:
-            # 创建默认配置
             self.config = self.get_default_config()
             self.save_config()
     
@@ -95,7 +177,8 @@ class ConfigManager:
                 'heartbeat_interval': 30,
                 'command_cooldown': 3,
                 'max_message_length': 2500,
-                'player_list_cache_ttl': 5
+                'player_list_cache_ttl': 5,
+                'max_server_logs': 100,
             },
             'custom_listeners': {
                 'enabled': False,
@@ -108,14 +191,12 @@ class ConfigManager:
         """验证配置文件"""
         errors = []
         
-        # 检查至少可用一种连接方式
         msmp_enabled = self.is_msmp_enabled()
         rcon_enabled = self.is_rcon_enabled()
         
         if not msmp_enabled and not rcon_enabled:
-            errors.append("必须至少可用MSMP或RCON其中一种连接方式")
+            errors.append("必须至少启用MSMP或RCON其中一种连接方式")
         
-        # 验证MSMP配置(如果启用)
         if msmp_enabled:
             if not self.get_msmp_host():
                 errors.append("MSMP host 未配置")
@@ -129,7 +210,6 @@ class ConfigManager:
             elif self.get_msmp_password() == 'your_msmp_password_here':
                 errors.append("MSMP password 仍使用默认值,请修改为实际密码")
         
-        # 验证RCON配置(如果启用)
         if rcon_enabled:
             if not self.get_rcon_host():
                 errors.append("RCON host 未配置")
@@ -143,7 +223,6 @@ class ConfigManager:
             elif self.get_rcon_password() == 'your_rcon_password_here':
                 errors.append("RCON password 仍使用默认值,请修改为实际密码")
         
-        # 验证WebSocket配置
         ws_port = self.get_ws_port()
         if not (1024 <= ws_port <= 65535):
             errors.append(f"WebSocket端口 {ws_port} 无效(应在1024-65535之间)")
@@ -154,7 +233,6 @@ class ConfigManager:
         if rcon_enabled and ws_port == self.get_rcon_port():
             errors.append(f"WebSocket端口不能与RCON端口相同 ({ws_port})")
         
-        # 验证QQ配置
         if not self.get_qq_groups():
             errors.append("至少需要配置一个QQ群")
         
@@ -169,13 +247,11 @@ class ConfigManager:
             if not isinstance(admin_id, int) or admin_id <= 0:
                 errors.append(f"无效的管理员QQ号: {admin_id}")
         
-        # 验证服务器配置(如果配置了启动脚本)
         start_script = self.get_server_start_script()
         if start_script:
             if not (start_script.endswith('.bat') or start_script.endswith('.sh')):
                 errors.append(f"服务器启动脚本格式不支持: {start_script}(仅支持.bat或.sh)")
         
-        # 验证自定义监听器配置
         listener_errors = self._validate_custom_listeners()
         errors.extend(listener_errors)
         
@@ -186,13 +262,13 @@ class ConfigManager:
         errors = []
         
         if not self.is_custom_listeners_enabled():
-            return errors  # 未启用监听器，无需验证
+            return errors
         
         try:
             rules = self.get_custom_listener_rules()
             
             if not rules:
-                return errors  # 没有规则配置
+                return errors
             
             for i, rule in enumerate(rules):
                 rule_errors = self._validate_listener_rule(rule, i)
@@ -207,7 +283,6 @@ class ConfigManager:
         """验证单个监听器规则"""
         errors = []
         
-        # 检查必需字段
         rule_name = rule.get('name', f'rule_{index}')
         
         if not rule.get('pattern'):
@@ -221,12 +296,64 @@ class ConfigManager:
         
         return errors
     
-    def reload(self):
-        """重新加载配置"""
-        self.load_config()
-        errors = self.validate_config()
-        if errors:
-            raise ConfigValidationError("配置验证失败:\n" + "\n".join(f"  - {e}" for e in errors))
+    def reload(self, notify_callbacks: bool = True) -> bool:
+        """重载配置文件
+        
+        Args:
+            notify_callbacks: 是否通知所有回调函数
+            
+        Returns:
+            True 如果重载成功，False 如果失败
+        """
+        with self._reload_lock:
+            try:
+                old_config = self.config.copy()
+                
+                self.load_config()
+                
+                errors = self.validate_config()
+                if errors:
+                    self.config = old_config
+                    raise ConfigValidationError("新配置验证失败:\n" + "\n".join(f"  - {e}" for e in errors))
+                
+                self._last_config_hash = self._get_config_hash()
+                
+                if notify_callbacks:
+                    self._trigger_reload_callbacks(old_config, self.config)
+                
+                return True
+                
+            except ConfigValidationError as e:
+                self.logger.error(f"配置重载失败: {e}")
+                return False
+            except Exception as e:
+                self.logger.error(f"配置重载异常: {e}", exc_info=True)
+                return False
+    
+    def _trigger_reload_callbacks(self, old_config: Dict, new_config: Dict):
+        """触发所有注册的重载回调函数"""
+        import asyncio
+        
+        for callback in self._reload_callbacks:
+            try:
+                if asyncio.iscoroutinefunction(callback):
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            future = asyncio.run_coroutine_threadsafe(
+                                callback(old_config, new_config),
+                                loop
+                            )
+                            future.result(timeout=10)
+                        else:
+                            loop.run_until_complete(callback(old_config, new_config))
+                    except RuntimeError:
+                        asyncio.run(callback(old_config, new_config))
+                else:
+                    callback(old_config, new_config)
+                    
+            except Exception as e:
+                self.logger.error(f"执行配置重载回调函数失败: {e}", exc_info=True)
     
     # ============ MSMP配置 ============
     def is_msmp_enabled(self) -> bool:
@@ -295,16 +422,13 @@ class ConfigManager:
     
     # ============ 命令配置 ============
     def get_tps_command(self) -> str:
-        """获取TPS命令配置"""
         return self.config.get('commands', {}).get('tps_command', 'tps')
     
     def is_command_enabled(self, command_name: str) -> bool:
-        """检查命令是否可用"""
         enabled_commands = self.config.get('commands', {}).get('enabled_commands', {})
         return enabled_commands.get(command_name, True)
     
     def get_enabled_commands(self) -> Dict[str, bool]:
-        """获取所有命令的可用状态"""
         return self.config.get('commands', {}).get('enabled_commands', {
             'list': True,
             'tps': True,
@@ -322,7 +446,6 @@ class ConfigManager:
     
     # ============ 区块监控配置 ============
     def get_chunk_monitor_config(self) -> Dict[str, bool]:
-        """获取区块监控配置"""
         return self.config.get('notifications', {}).get('chunk_monitor', {
             'enabled': False,
             'notify_admins': True,
@@ -330,15 +453,12 @@ class ConfigManager:
         })
 
     def is_chunk_monitor_enabled(self) -> bool:
-        """检查区块监控通知是否可用"""
         return self.get_chunk_monitor_config().get('enabled', False)
 
     def should_notify_admins_on_chunk_monitor(self) -> bool:
-        """检查是否向管理员发送区块监控通知"""
         return self.get_chunk_monitor_config().get('notify_admins', True)
 
     def should_notify_groups_on_chunk_monitor(self) -> bool:
-        """检查是否向QQ群发送区块监控通知"""
         return self.get_chunk_monitor_config().get('notify_groups', True)
     
     # ============ 高级配置 ============
@@ -354,17 +474,18 @@ class ConfigManager:
     def get_max_message_length(self) -> int:
         return self.config.get('advanced', {}).get('max_message_length', 500)
     
+    def get_max_server_logs(self) -> int:
+        """获取最大服务器日志行数"""
+        return self.config.get('advanced', {}).get('max_server_logs', 100)
+    
     # ============ 自定义监听器配置 ============
     def is_custom_listeners_enabled(self) -> bool:
-        """检查自定义监听器是否启用"""
         return self.config.get('custom_listeners', {}).get('enabled', False)
     
     def get_custom_listener_rules(self) -> List[Dict]:
-        """获取所有自定义监听器规则"""
         return self.config.get('custom_listeners', {}).get('rules', [])
     
     def get_custom_listener_rule(self, rule_name: str) -> Optional[Dict]:
-        """获取指定名称的监听器规则"""
         rules = self.get_custom_listener_rules()
         for rule in rules:
             if rule.get('name') == rule_name:
@@ -372,7 +493,6 @@ class ConfigManager:
         return None
     
     def add_custom_listener_rule(self, rule: Dict):
-        """添加新的监听器规则"""
         if 'custom_listeners' not in self.config:
             self.config['custom_listeners'] = {'enabled': False, 'rules': []}
         
@@ -383,7 +503,6 @@ class ConfigManager:
         self.save_config()
     
     def remove_custom_listener_rule(self, rule_name: str) -> bool:
-        """移除指定名称的监听器规则"""
         rules = self.get_custom_listener_rules()
         
         for i, rule in enumerate(rules):
@@ -395,7 +514,6 @@ class ConfigManager:
         return False
     
     def enable_custom_listeners(self):
-        """启用自定义监听器"""
         if 'custom_listeners' not in self.config:
             self.config['custom_listeners'] = {'enabled': True, 'rules': []}
         else:
@@ -403,7 +521,6 @@ class ConfigManager:
         self.save_config()
     
     def disable_custom_listeners(self):
-        """禁用自定义监听器"""
         if 'custom_listeners' not in self.config:
             self.config['custom_listeners'] = {'enabled': False, 'rules': []}
         else:

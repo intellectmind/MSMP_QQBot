@@ -92,12 +92,14 @@ advanced:
   reconnect_interval: 300
   # 心跳间隔（秒）
   heartbeat_interval: 30
-  # 命令冷却时间（秒）- 防止命令刷屏
+  # 命令冷却时间（秒）
   command_cooldown: 3
   # 最大消息长度
   max_message_length: 2500
   # 玩家列表缓存时间（秒）
   player_list_cache_ttl: 5
+  # 最大服务器日志行数
+  max_server_logs: 100
 
 # 调试模式
 debug: false
@@ -107,7 +109,6 @@ debug: false
 # ============================================================
 # 这个功能允许你通过正则表达式监听服务器日志
 # 匹配成功时可以向QQ群发送消息或向服务端执行指令
-
 custom_listeners:
   # 是否启用自定义监听功能
   enabled: false
@@ -120,8 +121,9 @@ custom_listeners:
       enabled: true
       pattern: "(\\w+) joined the game"
       case_sensitive: false
-      trigger_limit: 10  # 最多触发10次
-      trigger_cooldown: 60  # 60秒冷却
+      trigger_limit: 0        # 0表示无限制
+      trigger_cooldown: 0     # 冷却时间（秒），0表示无冷却
+      daily_limit: 0          # 每日限制，0表示无限制
       conditions:
         - type: "time_range"
           params:
@@ -129,12 +131,12 @@ custom_listeners:
             end: "23:00"
         - type: "player_online"
           params:
-            require: false  # 无论是否有其他玩家在线都触发
+            require: true
       qq_message: |
         玩家 {upper(group1)} 加入了游戏！
         服务器状态: TPS {server_tps} | 在线: {player_count}人
         时间: {time} | 规则: {rule_name}
-        今日第 {match_count} 次玩家加入
+        今日第 {trigger_today} 次玩家加入
       server_command: "say 欢迎 {upper(group1)} 加入游戏！当前在线: {player_count} 人"
 
     # 示例2: 服务器错误监控
@@ -143,21 +145,20 @@ custom_listeners:
       enabled: true
       pattern: "\\[ERROR\\].*?(Exception|Error|Crash|Failed)"
       case_sensitive: false
-      trigger_limit: 5  # 最多触发5次
-      trigger_cooldown: 300  # 5分钟冷却
+      trigger_limit: 0
+      trigger_cooldown: 300   # 5分钟冷却
+      daily_limit: 5          # 每天最多5次
       conditions:
         - type: "server_tps"
           params:
-            min_tps: 5  # 只在TPS低于5时通知
+            min_tps: 5
             max_tps: 20
       qq_message: |
         服务器错误告警！
         错误内容: {substr(match, 0, 100)}
         发生时间: {timestamp}
         当前TPS: {server_tps}
-        内存使用: {memory_usage}%
         在线玩家: {player_count}人
-        {if(player_count > 0, '有玩家在线，请及时处理！', '暂无玩家在线')}
       server_command: "say 检测到服务器错误，请查看控制台日志"
 
     # 示例3: 玩家聊天关键词监控
@@ -166,14 +167,14 @@ custom_listeners:
       enabled: true
       pattern: "<(\\w+)>.*?(作弊|外挂|bug|漏洞|hack|cheat)"
       case_sensitive: false
-      trigger_cooldown: 30  # 30秒冷却
+      trigger_limit: 0
+      trigger_cooldown: 30    # 30秒冷却
+      daily_limit: 0
       qq_message: |
         聊天关键词告警
         玩家: {group1}
         内容: {substr(match, 0, 50)}
-        关键词: {lower(replace(match, '.*?(作弊|外挂|bug|漏洞|hack|cheat).*', '$1'))}
         时间: {time}
-        {if(contains(lower(group1), 'admin') or contains(lower(group1), 'op'), '发言者是管理员', '请关注此玩家')}
       server_command: ""
 
     # 示例4: 服务器性能告警
@@ -183,19 +184,18 @@ custom_listeners:
       pattern: "Can't keep up!.*"
       case_sensitive: false
       trigger_limit: 3
-      trigger_cooldown: 600  # 10分钟冷却
+      trigger_cooldown: 600   # 10分钟冷却
+      daily_limit: 0
       conditions:
         - type: "memory_usage"
           params:
-            max_usage: 90  # 内存使用超过90%时才告警
+            max_usage: 90
       qq_message: |
         服务器性能告警！
         问题: {match}
         时间: {timestamp}
-        当前状态:
-          TPS: {server_tps}
-          内存: {memory_usage}%
-          玩家: {player_count}人
+        当前TPS: {server_tps}
+        内存: {memory_usage}%
         建议: {if(memory_usage > 80, '考虑重启释放内存', '检查插件性能')}
       server_command: "save-all"
 
@@ -205,14 +205,15 @@ custom_listeners:
       enabled: true
       pattern: "(\\w+) (was slain by|was shot by|fell|drowned|burned|blown up|died)"
       case_sensitive: false
+      trigger_limit: 0
       trigger_cooldown: 10
+      daily_limit: 0
       qq_message: |
         玩家死亡事件
         玩家: {group1}
         原因: {replace(match, '^\\w+ ', '')}
         时间: {time}
-        统计: 今日第 {match_count} 次死亡
-        {if(contains(match, 'slain') or contains(match, 'shot'), 'PVP事件', '环境死亡')}
+        统计: 今日第 {trigger_today} 次死亡
       server_command: ""
 
 # ============================================================
@@ -231,6 +232,7 @@ custom_listeners:
 #   case_sensitive - 是否大小写敏感 (默认: false)
 #   trigger_limit  - 触发次数限制 (0=无限制, 默认: 0)
 #   trigger_cooldown - 冷却时间(秒) (0=无冷却, 默认: 0)
+#   daily_limit    - 每日触发限制 (0=无限制, 默认: 0) 
 #   conditions     - 执行条件列表 (详见条件配置说明)
 #
 # 限制说明：
@@ -253,11 +255,13 @@ custom_listeners:
 #   {timestamp}    - 当前完整时间 (格式: YYYY-MM-DD HH:MM:SS)
 #   {date}         - 当前日期 (格式: YYYY-MM-DD)
 #   {time}         - 当前时间 (格式: HH:MM:SS)
+#   {weekday}      - 星期几 (周一-周日)
 #   {server_tps}   - 服务器TPS (每秒刻数)
 #   {player_count} - 在线玩家数量
 #   {memory_usage} - 内存使用率百分比
 #   {rule_name}    - 当前规则名称
 #   {match_count}  - 该规则的总匹配次数
+#   {trigger_today}- 该规则今天的触发次数
 #   {prev_match_time} - 上次匹配时间
 #
 # 函数式占位符（支持嵌套和复杂逻辑）：
@@ -272,11 +276,8 @@ custom_listeners:
 #   {startsWith(text, prefix)} - 检查文本是否以指定前缀开头
 #   {endsWith(text, suffix)}   - 检查文本是否以指定后缀结尾
 #   {if(cond, true, false)}    - 条件判断 (cond为真返回true，否则返回false)
-#
-# 函数式占位符参数说明：
-#   - 参数可以是字符串（用引号包围）、数字或变量名
-#   - 变量名包括: match, group1, group2..., 以及所有系统信息占位符
-#   - 支持嵌套函数调用
+#   {split(text, sep)}         - 按分隔符分割文本
+#   {join(sep, list)}          - 用分隔符连接列表
 #
 # ============================================================
 # 条件配置说明
@@ -331,14 +332,23 @@ custom_listeners:
 #       params:
 #         max_usage: 80.0
 #
-# 5. 自定义函数条件 (custom_function)
-#   作用: 通过自定义Python函数决定是否触发
-#   参数: 根据具体函数定义
+# 5. 重复间隔条件 (repeat_interval)
+#   作用: 防止规则频繁触发
+#   参数:
+#     interval: 秒数  # 最小触发间隔
 #   示例:
-#     - type: "custom_function"
+#     - type: "repeat_interval"
 #       params:
-#         function_name: "my_custom_check"
-#         some_parameter: "some_value"
+#         interval: 300  # 5分钟
+#
+# 6. 星期几条件 (weekday)
+#   作用: 只在特定日期触发
+#   参数:
+#     weekdays: [0,1,2,3,4]  # 0=周一, 6=周日
+#   示例:
+#     - type: "weekday"
+#       params:
+#         weekdays: [0, 1, 2, 3, 4]  # 周一到周五
 #
 # ============================================================
 # 正则表达式说明
@@ -366,55 +376,5 @@ custom_listeners:
 #   {n}         - 恰好n次
 #   {n,}        - 至少n次
 #   {n,m}       - n到m次
-#
-# 边界匹配：
-#   ^           - 字符串开始
-#   $           - 字符串结束
-#   \\b         - 单词边界
-#
-# 字符转义：
-#   \\[         - 转义 [ 字符
-#   \\(         - 转义 ( 字符
-#   \\.         - 转义 . 字符
-#   \\*         - 转义 * 字符
-#   \\+         - 转义 + 字符
-#   \\?         - 转义 ? 字符
-#   \\^         - 转义 ^ 字符
-#   \\$         - 转义 $ 字符
-#
-# ============================================================
-# 调试建议
-# ============================================================
-#
-# 1. 正则表达式调试：
-#    - 先用较宽松的正则测试（如 ".*pattern.*"）
-#    - 逐步精确正则表达式的匹配范围
-#    - 在服务器日志文件中查看实际的日志格式
-#    - 使用在线正则表达式测试工具验证（如 regex101.com）
-#
-# 2. 占位符调试：
-#    - 先用简单占位符测试（如 {match}）
-#    - 逐步添加复杂占位符和函数调用
-#    - 检查占位符替换是否正确
-#
-# 3. 条件调试：
-#    - 先不使用条件测试规则是否匹配
-#    - 逐个添加条件测试效果
-#    - 检查条件参数是否正确
-#
-# 4. 性能优化：
-#    - 避免使用过于复杂的正则表达式
-#    - 合理设置 trigger_limit 和 trigger_cooldown
-#    - 使用非捕获分组 (?:...) 提高性能
-#
-# 5. 日志分析：
-#    - 启用 debug: true 查看详细匹配过程
-#    - 检查规则统计信息了解匹配频率
-#    - 监控系统性能确保不会影响服务器运行
-#
-# 6. 安全考虑：
-#    - 避免在 server_command 中使用不受信任的输入
-#    - 对用户输入进行适当的转义处理
-#    - 设置合理的触发限制防止滥用
 #
 # ============================================================

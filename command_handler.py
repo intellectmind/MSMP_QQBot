@@ -265,9 +265,8 @@ class CommandHandlers:
             lines = [f"在线人数: {player_info.current_players}/{player_info.max_players}"]
             
             if player_info.current_players > 0 and player_info.player_names:
-                lines.append("\n在线玩家:")
-                for i, player_name in enumerate(player_info.player_names, 1):
-                    lines.append(f"{i}. {player_name.strip()}")
+                player_list = "    ".join(player_info.player_names)
+                lines.append(f"在线玩家:\n{player_list}")
             else:
                 lines.append("\n暂无玩家在线")
             

@@ -223,12 +223,14 @@ advanced:
   reconnect_interval: 300
   # 心跳间隔（秒）
   heartbeat_interval: 30
-  # 命令冷却时间（秒）- 防止命令刷屏
+  # 命令冷却时间（秒）
   command_cooldown: 3
   # 最大消息长度
   max_message_length: 2500
   # 玩家列表缓存时间（秒）
   player_list_cache_ttl: 5
+  # 最大服务器日志行数
+  max_server_logs: 100
 
 # 调试模式
 debug: false
@@ -244,14 +246,15 @@ custom_listeners:
   
   # 监听规则列表 - 可以添加无限个规则 
   rules:
-    # 示例: 玩家加入游戏的高级通知
+    # 示例1: 玩家加入游戏的高级通知
     - name: "player_join_advanced"
       description: "玩家加入游戏时发送智能通知"
       enabled: true
       pattern: "(\\w+) joined the game"
       case_sensitive: false
-      trigger_limit: 10  # 最多触发10次
-      trigger_cooldown: 60  # 60秒冷却
+      trigger_limit: 0        # 0表示无限制
+      trigger_cooldown: 0     # 冷却时间（秒），0表示无冷却
+      daily_limit: 0          # 每日限制，0表示无限制
       conditions:
         - type: "time_range"
           params:
@@ -259,13 +262,90 @@ custom_listeners:
             end: "23:00"
         - type: "player_online"
           params:
-            require: false  # 无论是否有其他玩家在线都触发
+            require: true
       qq_message: |
         玩家 {upper(group1)} 加入了游戏！
         服务器状态: TPS {server_tps} | 在线: {player_count}人
         时间: {time} | 规则: {rule_name}
-        今日第 {match_count} 次玩家加入
+        今日第 {trigger_today} 次玩家加入
       server_command: "say 欢迎 {upper(group1)} 加入游戏！当前在线: {player_count} 人"
+
+    # 示例2: 服务器错误监控
+    - name: "error_monitor"
+      description: "监控服务器错误并通知管理员"
+      enabled: true
+      pattern: "\\[ERROR\\].*?(Exception|Error|Crash|Failed)"
+      case_sensitive: false
+      trigger_limit: 0
+      trigger_cooldown: 300   # 5分钟冷却
+      daily_limit: 5          # 每天最多5次
+      conditions:
+        - type: "server_tps"
+          params:
+            min_tps: 5
+            max_tps: 20
+      qq_message: |
+        服务器错误告警！
+        错误内容: {substr(match, 0, 100)}
+        发生时间: {timestamp}
+        当前TPS: {server_tps}
+        在线玩家: {player_count}人
+      server_command: "say 检测到服务器错误，请查看控制台日志"
+
+    # 示例3: 玩家聊天关键词监控
+    - name: "chat_keyword_alert"
+      description: "监控玩家聊天中的关键词"
+      enabled: true
+      pattern: "<(\\w+)>.*?(作弊|外挂|bug|漏洞|hack|cheat)"
+      case_sensitive: false
+      trigger_limit: 0
+      trigger_cooldown: 30    # 30秒冷却
+      daily_limit: 0
+      qq_message: |
+        聊天关键词告警
+        玩家: {group1}
+        内容: {substr(match, 0, 50)}
+        时间: {time}
+      server_command: ""
+
+    # 示例4: 服务器性能告警
+    - name: "performance_alert"
+      description: "服务器性能下降告警"
+      enabled: true
+      pattern: "Can't keep up!.*"
+      case_sensitive: false
+      trigger_limit: 3
+      trigger_cooldown: 600   # 10分钟冷却
+      daily_limit: 0
+      conditions:
+        - type: "memory_usage"
+          params:
+            max_usage: 90
+      qq_message: |
+        服务器性能告警！
+        问题: {match}
+        时间: {timestamp}
+        当前TPS: {server_tps}
+        内存: {memory_usage}%
+        建议: {if(memory_usage > 80, '考虑重启释放内存', '检查插件性能')}
+      server_command: "save-all"
+
+    # 示例5: 玩家死亡通知
+    - name: "player_death_smart"
+      description: "玩家死亡时发送智能通知"
+      enabled: true
+      pattern: "(\\w+) (was slain by|was shot by|fell|drowned|burned|blown up|died)"
+      case_sensitive: false
+      trigger_limit: 0
+      trigger_cooldown: 10
+      daily_limit: 0
+      qq_message: |
+        玩家死亡事件
+        玩家: {group1}
+        原因: {replace(match, '^\\w+ ', '')}
+        时间: {time}
+        统计: 今日第 {trigger_today} 次死亡
+      server_command: ""
 ```
 
 ----------------------------------------------------------------------------------------------------------

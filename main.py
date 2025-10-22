@@ -318,42 +318,29 @@ class ConsoleCommandHandler:
             return f"启动服务器失败: {e}"
 
     async def _handle_console_stop(self) -> str:
-        """控制台直接停止服务器"""
+        """控制台直接停止服务器 - 使用QQ stop命令处理器"""
         try:
-            client_type, client = self.bot.qq_server.command_handlers._get_active_client()
-            
-            if not client:
-                return "服务器连接未就绪，无法执行停止命令"
+            if not self.bot.qq_server or not self.bot.qq_server.command_handlers:
+                return "qq_server 或 command_handlers 未初始化"
             
             print("正在停止Minecraft服务器...")
             
-            if client_type == 'msmp':
-                try:
-                    status = client.get_server_status_sync()
-                    if not status.get('started', False):
-                        return "服务器已经是停止状态"
-                    
-                    result = client.execute_command_sync("server/stop")
-                    
-                    if 'result' in result:
-                        return "✓ 停止命令已发送"
-                    else:
-                        error_msg = result.get('error', {}).get('message', '未知错误')
-                        return f"✗ 停止服务器失败: {error_msg}"
-                
-                except Exception as e:
-                    return f"MSMP停止命令失败: {e}"
+            # 直接调用 command_handlers 的 handle_stop 方法
+            result = await self.bot.qq_server.command_handlers.handle_stop(
+                user_id=0,        # 控制台调用，user_id 为 0
+                group_id=0,       # 无特定群组
+                websocket=None,   # 控制台不需要 websocket
+                is_private=False
+            )
             
-            else:
-                success = client.stop_server()
-                if success:
-                    return "✓ 停止命令已发送"
-                else:
-                    return "✗ RCON停止命令失败"
-                    
+            print(result if result else "✓ 停止命令已执行")
+            return result if result else "✓ 停止命令已执行"
+            
         except Exception as e:
-            self.logger.error(f"控制台停止服务器失败: {e}")
-            return f"停止服务器失败: {e}"
+            error_msg = f"停止服务器失败: {e}"
+            print(f"✗ {error_msg}")
+            self.logger.error(f"控制台停止服务器失败: {e}", exc_info=True)
+            return error_msg
 
     async def _handle_console_kill(self) -> str:
         """控制台直接强制杀死服务器 - 调用通用方法"""
@@ -728,6 +715,77 @@ class MsmpQQBot(ServerEventListener):
             await self.qq_server.start()
             self.logger.info("QQ机器人服务器已启动")
             
+            # 启动定时任务管理器
+            from scheduled_tasks import ScheduledTaskManager
+            
+            self.scheduled_task_manager = ScheduledTaskManager(
+                self.config_manager,
+                self.qq_server,
+                self.logger
+            )
+            
+            # 设置启动回调
+            async def on_auto_start_task(task):
+                """自动启动任务回调"""
+                if self.qq_server:
+                    await self.qq_server._start_server_process(None, 0)
+            
+            # 设置关闭回调
+            async def on_auto_stop_task(task):
+                """自动关闭任务回调"""
+                if self.qq_server and self.qq_server.command_handlers:
+                    await self.qq_server.command_handlers.handle_stop(
+                        user_id=0,
+                        group_id=0,
+                        websocket=None,
+                        is_private=False
+                    )
+            
+            # 设置重启回调 (在关闭后重新启动)
+            async def on_auto_restart_task(task):
+                """自动重启任务回调"""
+                if self.qq_server:
+                    self.logger.info("执行服务器启动流程...")
+                    await self.qq_server._start_server_process(None, 0)
+                    
+                    # 通知重启成功
+                    scheduled_config = self.config_manager.config.get('scheduled_tasks', {})
+                    restart_config = scheduled_config.get('auto_restart', {})
+                    restart_msg = restart_config.get('restart_success_message', '服务器已重启，欢迎回来！')
+                    
+                    await on_task_notify(task, restart_msg)
+            
+            # 设置通知回调
+            async def on_task_notify(task, message):
+                """任务通知回调 - 发送到QQ群"""
+                if self.qq_server and self.qq_server.current_connection:
+                    for group_id in self.qq_server.allowed_groups:
+                        try:
+                            await self.qq_server.send_group_message(
+                                self.qq_server.current_connection,
+                                group_id,
+                                message
+                            )
+                        except Exception as e:
+                            self.logger.error(f"发送定时通知失败: {e}")
+            
+            self.scheduled_task_manager.set_start_callback(on_auto_start_task)
+            self.scheduled_task_manager.set_stop_callback(on_auto_stop_task)
+            self.scheduled_task_manager.set_restart_callback(on_auto_restart_task)
+            self.scheduled_task_manager.set_notify_callback(on_task_notify)
+            
+            # 启动定时任务管理器
+            self.scheduled_task_manager.start()
+            self.logger.info("定时任务管理器已启动")
+            
+            # 注册配置重载回调以更新定时任务
+            if self.config_manager:
+                async def on_config_reload(old_config, new_config):
+                    if self.scheduled_task_manager:
+                        self.scheduled_task_manager.reload_tasks_from_config()
+                
+                self.config_manager.register_reload_callback(on_config_reload)
+
             # 初始化MSMP客户端（如果启用）
             if self.config_manager.is_msmp_enabled():
                 self.msmp_client = MSMPClient(
@@ -841,6 +899,11 @@ class MsmpQQBot(ServerEventListener):
         self.logger.info("正在停止MSMP_QQBot服务...")
         self.running = False
         
+        # 停止定时任务管理器
+        if hasattr(self, 'scheduled_task_manager') and self.scheduled_task_manager:
+            self.scheduled_task_manager.stop()
+            self.logger.info("定时任务管理器已停止")
+
         # ============ 停止配置文件监控 ============
         if self.config_manager:
             self.config_manager.stop_file_monitor()

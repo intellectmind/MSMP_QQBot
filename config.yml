@@ -69,7 +69,7 @@ commands:
     status: true  # 状态查询命令
     help: true    # 帮助命令
 
-  # 否开放管理员命令，开放后非管理员也可以使用管理员命令，管理员不受此限制
+  # 是否开放管理员命令，开放后非管理员也可以使用管理员命令，管理员不受此影响
   enabled_admin_commands:
     start: false          # 启动服务器命令
     stop: false           # 停止服务器命令

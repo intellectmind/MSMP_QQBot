@@ -49,6 +49,10 @@
   重新连接MSMP服务
 • reconnect_rcon / 重连rcon / /reconnect_rcon
   重新连接RCON服务
+• kill / force-stop / 强制停止
+  强制中止Minecraft服务器进程(不保存数据)
+• crash / crash-report / 崩溃报告
+  获取最新的服务器崩溃报告
 • sysinfo / 系统信息 / /sysinfo
   查看服务器系统信息(CPU、内存、硬盘、网络)
 • disk / 硬盘 / /disk
@@ -87,6 +91,7 @@
 服务器管理命令 (使用 # 前缀):
   #start           - 启动Minecraft服务器
   #stop            - 停止Minecraft服务器
+  #kill            - 强制杀死服务器进程(不保存数据,紧急用)
   #server_status   - 查看服务器进程状态
 
 服务器查询命令 (使用 # 前缀):

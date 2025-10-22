@@ -141,7 +141,7 @@ WebSocket反向连接示例
 # Minecraft Server Management Protocol (MSMP) 配置
 msmp:
   # 是否启用MSMP（推荐：功能最完整，需版本1.21.9+，需关闭management-server-tls）
-  enabled: true
+  enabled: false
   # MSMP服务器地址
   host: localhost
   # MSMP端口 (需要在服务端配置文件中设置 management-server-port)
@@ -152,7 +152,7 @@ msmp:
 # RCON连接配置
 rcon:
   # 是否启用RCON（与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
-  enabled: true
+  enabled: false
   # RCON服务器地址
   host: localhost
   # RCON端口
@@ -206,6 +206,23 @@ commands:
     rules: true   # 规则查询命令
     status: true  # 状态查询命令
     help: true    # 帮助命令
+
+  # 是否开放管理员命令，开放后非管理员也可以使用管理员命令，管理员不受此影响
+  enabled_admin_commands:
+    start: false          # 启动服务器命令
+    stop: false           # 停止服务器命令
+    kill: false           # 强制停止服务器命令
+    reload: false         # 重载配置命令
+    log: false            # 查看服务器日志命令
+    reconnect: false      # 重连所有服务命令
+    reconnect_msmp: false # 重连MSMP命令
+    reconnect_rcon: false # 重连RCON命令
+    crash: false          # 崩溃报告命令
+    sysinfo: false        # 系统信息命令
+    disk: false           # 磁盘信息命令
+    process: false        # 进程信息命令
+    network: false        # 网络信息命令
+    listeners: false      # 监听规则命令
 
 # 通知配置
 notifications:

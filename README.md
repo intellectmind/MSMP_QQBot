@@ -179,12 +179,12 @@ qq:
   # 允许使用机器人的QQ群号列表
   groups:
     - 123456789  # 群号
-    - 234567891   # 可以添加更多群号
+    - 234567891   # 可以添加/删除更多群号
 
   # QQ管理员列表 (可以使用start/stop命令的用户)
   admins:
     - 123456789  # 管理员QQ
-    - 987654321  # 可以添加更多管理员QQ
+    - 987654321  # 可以添加/删除更多管理员QQ
 
   # 欢迎新成员消息
   welcome_new_members: false
@@ -192,9 +192,9 @@ qq:
 
 # 服务器启动配置
 server:
-  # 服务器启动脚本路径 (支持.bat/.sh文件)
+  # 服务器启动脚本路径 (支持.bat/.sh文件)，路径不能使用\，而是用/，不用加UTF-8编码这些
   start_script: "G:/1.21.9/start.bat"
-  # 工作目录 (可选，不填则使用脚本所在目录)
+  # 工作目录 (可选，不填则使用脚本所在目录)，路径不能使用\，而是用/
   working_directory: ""
   # 服务器启动超时时间（秒）
   startup_timeout: 300
@@ -260,6 +260,62 @@ advanced:
   player_list_cache_ttl: 5
   # 最大服务器日志行数
   max_server_logs: 100
+
+# 定时任务配置
+scheduled_tasks:
+  # 是否启用定时任务
+  enabled: false
+  
+  # 定时启动服务器
+  auto_start:
+    # 是否启用定时启动
+    enabled: false
+    # 启动时间列表 (24小时制 HH:MM)
+    times:
+      - "08:00"    # 早上8点启动
+      - "18:00"    # 下午6点启动，可添加更多/删除
+    # 启动前通知 (秒数，0=不通知)
+    pre_notify_seconds: 300  # 提前5分钟通知
+    # 通知消息
+    notify_message: "服务器将在 {countdown} 秒后启动，请做好准备"
+  
+  # 定时关闭服务器
+  auto_stop:
+    # 是否启用定时关闭
+    enabled: false
+    # 关闭时间列表 (24小时制 HH:MM)
+    times:
+      - "12:00"    # 中午12点关闭
+      - "23:59"    # 晚上11:59关闭，可添加更多/删除
+    # 关闭前警告 (秒数，0=不通知)
+    warning_before_seconds: 600  # 提前10分钟警告
+    # 第一次警告消息
+    first_warning: "服务器将在 {countdown} 秒后关闭，请保存游戏"
+    # 第二次警告消息 (关闭前1分钟)
+    second_warning: "服务器即将在 1 分钟后关闭"
+    # 立即关闭消息
+    immediate_message: "服务器正在关闭"
+
+  # 定时重启服务器
+  auto_restart:
+    # 是否启用定时重启
+    enabled: false
+    # 重启时间列表 (24小时制 HH:MM)
+    times:
+      - "04:00"    # 凌晨4点重启
+      - "16:00"    # 下午4点重启，可添加更多/删除
+    # 重启前警告 (秒数，0=不通知)
+    warning_before_seconds: 600  # 提前10分钟警告
+    # 第一次警告消息
+    first_warning: "服务器将在 {countdown} 秒后重启，请保存游戏"
+    # 第二次警告消息 (重启前1分钟)
+    second_warning: "服务器即将在 1 分钟后重启"
+    # 立即重启消息
+    immediate_message: "服务器正在重启"
+    # 关闭后重启前等待时间 (秒数)
+    wait_before_startup: 10
+    # 重启成功消息
+    restart_success_message: "服务器已重启，欢迎回来！"
 
 # 调试模式
 debug: false

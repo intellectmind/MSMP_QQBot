@@ -125,13 +125,13 @@ class ConfigManager:
         """获取默认配置"""
         return {
             'msmp': {
-                'enabled': True,
+                'enabled': False,
                 'host': 'localhost',
                 'port': 21111,
                 'password': 'your_msmp_password_here'
             },
             'rcon': {
-                'enabled': True,
+                'enabled': False,
                 'host': 'localhost',
                 'port': 25575,
                 'password': 'your_rcon_password_here'
@@ -160,6 +160,22 @@ class ConfigManager:
                     'rules': True,
                     'status': True,
                     'help': True
+                },
+                'enabled_admin_commands': {
+                    'start': False,
+                    'stop': False,
+                    'kill': False,
+                    'reload': False,
+                    'log': False,
+                    'reconnect': False,
+                    'reconnect_msmp': False,
+                    'reconnect_rcon': False,
+                    'crash': False,
+                    'sysinfo': False,
+                    'disk': False,
+                    'process': False,
+                    'network': False,
+                    'listeners': False
                 }
             },
             'notifications': {
@@ -167,7 +183,7 @@ class ConfigManager:
                 'player_events': True,
                 'log_messages': False,
                 'chunk_monitor': {
-                    'enabled': False,
+                    'enabled': True,
                     'notify_admins': True,
                     'notify_groups': True
                 }
@@ -252,6 +268,18 @@ class ConfigManager:
             if not (start_script.endswith('.bat') or start_script.endswith('.sh')):
                 errors.append(f"服务器启动脚本格式不支持: {start_script}(仅支持.bat或.sh)")
         
+        commands_config = self.config.get('commands', {})
+        
+        enabled_commands = commands_config.get('enabled_commands', {})
+        for cmd_name, enabled in enabled_commands.items():
+            if not isinstance(enabled, bool):
+                errors.append(f"基础命令 {cmd_name} 的启用状态必须是布尔值")
+        
+        enabled_admin_commands = commands_config.get('enabled_admin_commands', {})
+        for cmd_name, enabled in enabled_admin_commands.items():
+            if not isinstance(enabled, bool):
+                errors.append(f"管理员命令 {cmd_name} 的启用状态必须是布尔值")
+
         listener_errors = self._validate_custom_listeners()
         errors.extend(listener_errors)
         
@@ -423,11 +451,41 @@ class ConfigManager:
     # ============ 命令配置 ============
     def get_tps_command(self) -> str:
         return self.config.get('commands', {}).get('tps_command', 'tps')
-    
+
     def is_command_enabled(self, command_name: str) -> bool:
+        """检查基础命令是否启用（管理员不受此限制）"""
         enabled_commands = self.config.get('commands', {}).get('enabled_commands', {})
         return enabled_commands.get(command_name, True)
-    
+
+    def is_admin_command_enabled(self, command_name: str) -> bool:
+        """检查管理员命令是否启用（管理员不受此限制）"""
+        enabled_admin_commands = self.config.get('commands', {}).get('enabled_admin_commands', {})
+        return enabled_admin_commands.get(command_name, True)
+
+    def can_use_command(self, user_id: int, command_name: str, is_admin_command: bool = False) -> bool:
+        """检查用户是否可以使用命令
+        Args:
+            user_id: 用户ID
+            command_name: 命令名称
+            is_admin_command: 是否为管理员命令
+        Returns:
+            bool: 是否可以使用
+        """
+        is_admin = self.is_admin(user_id)
+        
+        if is_admin_command:
+            # 管理员命令：管理员始终可用，非管理员需要检查是否启用
+            if is_admin:
+                return True
+            else:
+                return self.is_admin_command_enabled(command_name)
+        else:
+            # 基础命令：管理员始终可用，非管理员需要检查是否启用
+            if is_admin:
+                return True
+            else:
+                return self.is_command_enabled(command_name)
+
     def get_enabled_commands(self) -> Dict[str, bool]:
         return self.config.get('commands', {}).get('enabled_commands', {
             'list': True,
@@ -435,6 +493,25 @@ class ConfigManager:
             'rules': True,
             'status': True,
             'help': True
+        })
+
+    def get_enabled_admin_commands(self) -> Dict[str, bool]:
+        """获取启用的管理员命令列表"""
+        return self.config.get('commands', {}).get('enabled_admin_commands', {
+            'start': False,
+            'stop': False,
+            'kill': False,
+            'reload': False,
+            'log': False,
+            'reconnect': False,
+            'reconnect_msmp': False,
+            'reconnect_rcon': False,
+            'crash': False,
+            'sysinfo': False,
+            'disk': False,
+            'process': False,
+            'network': False,
+            'listeners': False
         })
     
     # ============ 通知配置 ============

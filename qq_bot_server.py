@@ -21,7 +21,7 @@ class QQBotWebSocketServer:
     """
     
     def __init__(self, port: int, allowed_groups: List[int], msmp_client, logger: logging.Logger, 
-                 access_token: str = "", config_manager=None, rcon_client=None):
+             access_token: str = "", config_manager=None, rcon_client=None):
         self.port = port
         self.allowed_groups = allowed_groups
         self.msmp_client = msmp_client
@@ -34,6 +34,7 @@ class QQBotWebSocketServer:
         self.server = None
         self.connected_clients = set()
         self.server_process = None
+        self.server_stopping = False
         
         # ============ 使用deque替代list，限制日志大小 ============
         max_logs = config_manager.get_max_server_logs() if config_manager else 100
@@ -259,6 +260,24 @@ class QQBotWebSocketServer:
             cooldown=10
         )
 
+        self.command_handler.register_command(
+            names=['kill', 'force-stop', '强制停止', '/kill'],
+            handler=self.command_handlers.handle_kill,
+            admin_only=True,
+            description='强制中止Minecraft服务器进程(不保存数据)',
+            usage='kill',
+            cooldown=10
+        )
+
+        self.command_handler.register_command(
+            names=['crash', 'crash-report', '崩溃报告', '/crash'],
+            handler=self.command_handlers.handle_crash,
+            admin_only=True,
+            description='获取最新的服务器崩溃报告',
+            usage='crash',
+            cooldown=5
+        )
+
         # 系统监控命令
         self.command_handler.register_command(
             names=['sysinfo', '系统信息', '/sysinfo', '系统', 'sys'],
@@ -329,15 +348,18 @@ class QQBotWebSocketServer:
         # 写入到日志文件
         self._write_to_log_file(formatted_log)
         
-        # 处理自定义监听规则
-        if self.custom_listener:
+        # 处理自定义监听规则（仅当连接活跃时）
+        if self.custom_listener and self.current_connection and not self.current_connection.closed:
             try:
                 asyncio.create_task(self._process_server_log(log_line))
             except Exception as e:
                 self.logger.error(f"创建日志处理任务失败: {e}")
         
-        # 检查区块监控消息
-        if self.config_manager and self.config_manager.is_chunk_monitor_enabled():
+        # 检查区块监控消息（仅当连接活跃时）
+        if (self.config_manager and 
+            self.config_manager.is_chunk_monitor_enabled() and
+            self.current_connection and 
+            not self.current_connection.closed):
             if self._is_chunk_monitor_message(log_line):
                 asyncio.create_task(self._send_chunk_monitor_notification(log_line))
         
@@ -838,32 +860,47 @@ class QQBotWebSocketServer:
     async def _process_server_log(self, log_line: str):
         """处理服务器日志中的自定义监听规则"""
         try:
+            # 检查连接是否已关闭，如果关闭则跳过处理
+            if not self.current_connection or self.current_connection.closed:
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug("QQ连接已断开，跳过日志处理")
+                return
+            
             if self.custom_listener and self.current_connection and not self.current_connection.closed:
+                # 检查 RCON 和 MSMP 连接状态
+                rcon_connected = self.rcon_client and self.rcon_client.is_connected() if self.rcon_client else False
+                msmp_connected = self.msmp_client and self.msmp_client.is_connected() if self.msmp_client else False
+                
+                # 如果两个连接都断了，不需要处理日志中的服务器操作
+                if not rcon_connected and not msmp_connected:
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug("服务器连接已断开，跳过日志处理")
+                    return
+                
                 # 获取实际的玩家数
                 player_count = 0
                 try:
-                    # 优先使用RCON（同步），避免异步问题
-                    if (self.config_manager.is_rcon_enabled() and 
-                        self.rcon_client and 
-                        self.rcon_client.is_connected()):
+                    # 优先使用RCON（同步，快速）
+                    if rcon_connected:
                         player_info = self.rcon_client.get_player_list()
                         player_count = player_info.current_players
-                        self.logger.debug(f"通过RCON获取玩家数: {player_count}")
-                    # 其次尝试MSMP
-                    elif (self.config_manager.is_msmp_enabled() and 
-                          self.msmp_client and 
-                          self.msmp_client.is_connected()):
+                        if self.logger.isEnabledFor(logging.DEBUG):
+                            self.logger.debug(f"通过RCON获取玩家数: {player_count}")
+                    # 其次尝试MSMP（异步）
+                    elif msmp_connected:
                         try:
                             player_info = await asyncio.wait_for(
                                 self.msmp_client.get_player_list(),
                                 timeout=2.0
                             )
                             player_count = player_info.current_players
-                            self.logger.debug(f"通过MSMP获取玩家数: {player_count}")
+                            if self.logger.isEnabledFor(logging.DEBUG):
+                                self.logger.debug(f"通过MSMP获取玩家数: {player_count}")
                         except asyncio.TimeoutError:
                             self.logger.warning("MSMP获取玩家数超时")
                 except Exception as e:
-                    self.logger.warning(f"获取玩家数失败: {e}")
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(f"获取玩家数失败: {e}")
                     player_count = 0
                 
                 # 构建上下文
@@ -873,6 +910,7 @@ class QQBotWebSocketServer:
                     'memory_usage': 0.0,
                 }
                 
+                # 处理自定义监听规则
                 await self.custom_listener.process_message(
                     log_line=log_line,
                     websocket=self.current_connection,
@@ -923,9 +961,151 @@ class QQBotWebSocketServer:
         except Exception as e:
             self.logger.error(f"发送区块监控通知异常: {e}", exc_info=True)
     
+    async def _check_and_clean_file_locks(self):
+        """检查并清理可能的文件锁"""
+        try:
+            working_dir = self.config_manager.get_server_working_directory()
+            if not working_dir:
+                start_script = self.config_manager.get_server_start_script()
+                working_dir = os.path.dirname(start_script)
+            
+            # 1. 检查并清理 session.lock 文件
+            session_lock = os.path.join(working_dir, "session.lock")
+            if os.path.exists(session_lock):
+                self.logger.warning(f"发现残留的session.lock文件: {session_lock}")
+                try:
+                    os.remove(session_lock)
+                    self.logger.info("已清理session.lock文件")
+                except Exception as e:
+                    self.logger.warning(f"无法删除session.lock: {e}")
+            
+            # 2. 检查世界目录中的session.lock
+            world_dirs = ["world", "world_nether", "world_the_end"]
+            for world_dir in world_dirs:
+                world_lock = os.path.join(working_dir, world_dir, "session.lock")
+                if os.path.exists(world_lock):
+                    self.logger.warning(f"发现世界锁文件: {world_lock}")
+                    try:
+                        os.remove(world_lock)
+                        self.logger.info(f"已清理世界锁文件: {world_lock}")
+                    except Exception as e:
+                        self.logger.warning(f"无法删除世界锁文件 {world_lock}: {e}")
+            
+            # 3. 检查并清理 logs/latest.log 文件
+            latest_log = os.path.join(working_dir, "logs", "latest.log")
+            if os.path.exists(latest_log):
+                self.logger.warning(f"发现被占用的latest.log文件: {latest_log}")
+                try:
+                    # 先尝试重命名而不是直接删除
+                    backup_name = os.path.join(working_dir, "logs", f"latest.log.backup.{int(time.time())}")
+                    os.rename(latest_log, backup_name)
+                    self.logger.info(f"已重命名latest.log为: {backup_name}")
+                except Exception as e:
+                    self.logger.warning(f"无法处理latest.log: {e}")
+                    # 如果重命名失败，尝试等待后删除
+                    await asyncio.sleep(1)
+                    try:
+                        os.remove(latest_log)
+                        self.logger.info("已强制删除latest.log文件")
+                    except Exception as e2:
+                        self.logger.error(f"无法删除latest.log: {e2}")
+            
+            # 4. 检查端口占用
+            await self._check_port_availability()
+            
+            self.logger.info("文件锁和端口检查完成")
+            
+        except Exception as e:
+            self.logger.warning(f"检查文件锁时出错: {e}")
+    
+    async def _check_port_availability(self):
+        """检查MSMP和RCON端口是否被占用"""
+        try:
+            import socket
+            
+            # 检查MSMP端口
+            if self.config_manager.is_msmp_enabled():
+                msmp_port = self.config_manager.get_msmp_port()
+                retry_count = 0
+                max_retries = 6  # 等待最多 30 秒
+                
+                while retry_count < max_retries:
+                    if not await self._is_port_in_use('localhost', msmp_port):
+                        self.logger.info(f"MSMP端口 {msmp_port} 已释放")
+                        break
+                    
+                    if retry_count == 0:
+                        self.logger.warning(f"MSMP端口 {msmp_port} 仍被占用，等待释放...")
+                    
+                    retry_count += 1
+                    await asyncio.sleep(5)
+                
+                if retry_count >= max_retries:
+                    self.logger.warning(f"MSMP端口 {msmp_port} 在 30 秒后仍被占用，强制尝试释放...")
+                    await self._kill_process_using_port(msmp_port)
+            
+            # 检查RCON端口
+            if self.config_manager.is_rcon_enabled():
+                rcon_port = self.config_manager.get_rcon_port()
+                if await self._is_port_in_use('localhost', rcon_port):
+                    self.logger.warning(f"RCON端口 {rcon_port} 被占用，尝试释放...")
+                    await self._kill_process_using_port(rcon_port)
+                    
+        except Exception as e:
+            self.logger.warning(f"检查端口可用性时出错: {e}")
+
+    async def _is_port_in_use(self, host: str, port: int) -> bool:
+        """检查端口是否被占用"""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                result = s.connect_ex((host, port))
+                return result == 0
+        except:
+            return False
+
+    async def _kill_process_using_port(self, port: int):
+        """杀死占用指定端口的进程（Windows平台）"""
+        if os.name != 'nt':
+            return
+        
+        try:
+            import subprocess
+            
+            # 使用 netstat 查找占用端口的进程
+            result = subprocess.run(
+                ['netstat', '-ano', '-p', 'TCP'],
+                capture_output=True, 
+                text=True, 
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if f':{port}' in line and 'LISTENING' in line:
+                        parts = line.split()
+                        if len(parts) >= 5:
+                            pid = parts[-1]
+                            self.logger.warning(f"发现进程 {pid} 占用端口 {port}")
+                            
+                            # 尝试终止进程
+                            try:
+                                subprocess.run(['taskkill', '/PID', pid, '/F'], 
+                                             capture_output=True, timeout=10)
+                                self.logger.info(f"已终止进程 {pid}")
+                                await asyncio.sleep(2)  # 等待进程完全终止
+                            except Exception as e:
+                                self.logger.warning(f"终止进程 {pid} 失败: {e}")
+            
+        except Exception as e:
+            self.logger.warning(f"检查端口占用进程失败: {e}")
+
     async def _start_server_process(self, websocket, group_id: int = 0, private_user_id: int = None):
         """启动服务器进程 - 支持控制台和QQ调用"""
         try:
+            # 在启动前检查并清理可能的文件锁
+            await self._check_and_clean_file_locks()
+            
             self._setup_log_file()
             
             start_script = self.config_manager.get_server_start_script()
@@ -935,6 +1115,17 @@ class QQBotWebSocketServer:
             
             self.logger.info(f"启动脚本: {start_script}")
             self.logger.info(f"工作目录: {working_dir}")
+            
+            # 检查启动脚本是否存在
+            if not os.path.exists(start_script):
+                error_msg = f"启动脚本不存在: {start_script}"
+                self.logger.error(error_msg)
+                if websocket and not websocket.closed:
+                    if group_id > 0:
+                        await self.send_group_message(websocket, group_id, error_msg)
+                    elif private_user_id:
+                        await self.send_private_message(websocket, private_user_id, error_msg)
+                return
             
             creationflags = 0
             if os.name == 'nt':
@@ -953,12 +1144,30 @@ class QQBotWebSocketServer:
             
             self.logger.info(f"服务器进程已创建,PID: {self.server_process.pid}")
             
+            # 立即检查进程状态
+            return_code = self.server_process.poll()
+            if return_code is not None:
+                self.logger.error(f"服务器进程立即退出，返回码: {return_code}")
+                error_msg = f"服务器启动失败，进程立即退出 (返回码: {return_code})"
+                if websocket and not websocket.closed:
+                    if group_id > 0:
+                        await self.send_group_message(websocket, group_id, error_msg)
+                    elif private_user_id:
+                        await self.send_private_message(websocket, private_user_id, error_msg)
+                self.server_process = None
+                self._close_log_file()
+                return
+            
             if websocket and not websocket.closed:
                 if group_id > 0:
                     await self.send_group_message(websocket, group_id, "服务器启动命令已执行")
                 elif private_user_id:
                     await self.send_private_message(websocket, private_user_id, "服务器启动命令已执行")
             
+            # 重置停止标志
+            self.server_stopping = False
+            
+            # 启动日志读取和进程监控
             asyncio.create_task(self._read_server_output())
             asyncio.create_task(self._monitor_server_process(websocket, group_id))
             
@@ -972,6 +1181,8 @@ class QQBotWebSocketServer:
                 elif private_user_id:
                     await self.send_private_message(websocket, private_user_id, error_msg)
             
+            self.server_process = None
+            self._close_log_file()
             raise
 
     def _decode_line(self, line_bytes: bytes) -> str:
@@ -1000,14 +1211,24 @@ class QQBotWebSocketServer:
             self.logger.info("Minecraft服务器日志 (您仍可在服务器窗口输入命令)")
             self.logger.info("=" * 60)
             
-            while self.server_process and self.server_process.poll() is None:
+            empty_line_count = 0
+            max_empty_lines = 10  # 连续空行的最大次数
+            
+            while self.server_process and not self.server_stopping:
+                # 检查进程是否已结束
+                if self.server_process.poll() is not None:
+                    self.logger.info("检测到服务器进程已结束，停止日志采集")
+                    break
+
                 try:
+                    # 使用非阻塞方式读取输出
                     line_bytes = await asyncio.get_event_loop().run_in_executor(
                         None, 
-                        self.server_process.stdout.readline
+                        lambda: self.server_process.stdout.readline() if self.server_process else b''
                     )
                     
                     if line_bytes:
+                        empty_line_count = 0  # 重置空行计数
                         try:
                             line_str = self._decode_line(line_bytes)
                         except Exception as e:
@@ -1019,19 +1240,33 @@ class QQBotWebSocketServer:
                         if line_str:
                             print(f"[MC Server] {line_str}")
                             
-                            self._store_server_log(line_str)
+                            # 只在未停止时存储日志
+                            if not self.server_stopping:
+                                self._store_server_log(line_str)
                             
                             if self._is_server_ready(line_str):
                                 self.logger.info("检测到服务器启动完成")
                                 asyncio.create_task(self._send_server_started_notification())
-                                
+                    else:
+                        # 空行处理
+                        empty_line_count += 1
+                        if empty_line_count >= max_empty_lines:
+                            # 检查进程是否真的结束了
+                            if self.server_process.poll() is not None:
+                                self.logger.info("进程已结束，停止日志采集")
+                                break
+                            else:
+                                # 进程还在运行，只是没有输出，重置计数继续等待
+                                empty_line_count = 0
+                        
+                        # 没有数据时短暂休眠，避免CPU占用过高
+                        await asyncio.sleep(0.1)
+                        
                 except Exception as e:
                     self.logger.error(f"读取输出行失败: {e}")
                     await asyncio.sleep(0.1)
                     continue
                 
-                await asyncio.sleep(0.01)
-            
             self.logger.info("=" * 60)
             self.logger.info("服务器输出采集已结束")
             self.logger.info("=" * 60)
@@ -1039,7 +1274,9 @@ class QQBotWebSocketServer:
         except Exception as e:
             self.logger.error(f"读取服务器输出失败: {e}", exc_info=True)
         finally:
-            self._close_log_file()
+            # 只有在真正停止时才关闭日志文件
+            if self.server_stopping or (self.server_process and self.server_process.poll() is not None):
+                self._close_log_file()
 
     def _is_server_ready(self, line: str) -> bool:
         """检查服务器是否启动完成"""
@@ -1179,7 +1416,11 @@ class QQBotWebSocketServer:
             
             self.logger.info(f"服务器进程退出,返回码: {return_code}")
             
-            self._close_log_file()
+            # 服务器停止时立即关闭所有连接
+            if hasattr(self, 'command_handlers'):
+                await self.command_handlers._close_all_connections()
+            else:
+                self._close_log_file()
             
             if return_code == 0:
                 message = "服务器正常关闭"
@@ -1196,3 +1437,75 @@ class QQBotWebSocketServer:
             self.logger.error(f"监控服务器进程失败: {e}", exc_info=True)
             self.server_process = None
             self._close_log_file()
+
+    async def _send_crash_report_file(self, websocket, user_id: int, group_id: int, file_path: str, is_private: bool = False):
+        """直接发送崩溃报告文件到群或私聊"""
+        try:
+            if not websocket or websocket.closed:
+                self.logger.warning("无法发送文件:WebSocket连接已关闭")
+                return
+            
+            from pathlib import Path
+            import json
+            import time
+            
+            file_obj = Path(file_path)
+            
+            if not file_obj.exists():
+                error_msg = f"文件不存在: {file_path}"
+                if is_private:
+                    await self.send_private_message(websocket, user_id, error_msg)
+                else:
+                    await self.send_group_message(websocket, group_id, error_msg)
+                return
+            
+            # 获取文件大小
+            file_size = file_obj.stat().st_size
+            
+            self.logger.info(f"正在发送崩溃报告: {file_obj.name} (大小: {file_size / (1024*1024):.2f}MB)")
+            
+            # 检查文件大小限制
+            max_file_size = 50 * 1024 * 1024  # 50MB
+            if file_size > max_file_size:
+                error_msg = f"崩溃报告文件过大({file_size / (1024*1024):.2f}MB > {max_file_size / (1024*1024):.0f}MB)，请手动查看"
+                if is_private:
+                    await self.send_private_message(websocket, user_id, error_msg)
+                else:
+                    await self.send_group_message(websocket, group_id, error_msg)
+                return
+            
+            # 使用 file:// 协议发送本地文件
+            file_url = f"file:///{file_obj.absolute()}"  # 转换为绝对路径
+            
+            # 构建消息
+            message_content = [
+                {"type": "text", "data": {"text": f"【崩溃报告】{file_obj.name}\n文件大小: {file_size / (1024*1024):.2f}MB\n"}},
+                {"type": "file", "data": {"file": file_url}}
+            ]
+            
+            request = {
+                "action": "send_msg" if (is_private and not group_id) else ("send_private_msg" if is_private else "send_group_msg"),
+                "echo": f"crash_report_{int(time.time() * 1000)}",
+                "params": {}
+            }
+            
+            if is_private:
+                request["params"]["user_id"] = user_id
+            else:
+                request["params"]["group_id"] = group_id
+            
+            request["params"]["message"] = message_content
+            
+            await websocket.send(json.dumps(request))
+            self.logger.info(f"已发送崩溃报告文件: {file_obj.name}")
+            
+        except Exception as e:
+            self.logger.error(f"发送崩溃报告文件失败: {e}", exc_info=True)
+            try:
+                error_msg = f"发送文件失败: {e}"
+                if is_private:
+                    await self.send_private_message(websocket, user_id, error_msg)
+                else:
+                    await self.send_group_message(websocket, group_id, error_msg)
+            except:
+                pass

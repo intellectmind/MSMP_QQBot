@@ -135,20 +135,34 @@ class RCONClient:
         if not self.authenticated:
             raise Exception("RCON未认证")
         
+        # 检查socket连接状态
+        if not self.socket:
+            raise Exception("RCON连接已关闭")
+        
         try:
+            # 设置较短的超时时间，避免长时间等待
+            original_timeout = self.socket.gettimeout()
+            self.socket.settimeout(5.0)  # 5秒超时
+            
             # 发送命令
             self._send_packet(self.SERVERDATA_EXECCOMMAND, command)
             
             # 接收响应
             _, _, response = self._receive_packet()
             
+            # 恢复原始超时设置
+            self.socket.settimeout(original_timeout)
+            
             return response
             
         except socket.timeout:
-            self.logger.error(f"执行RCON命令超时: {command}")
+            self.logger.warning(f"执行RCON命令超时: {command}")
+            # 超时时不关闭连接，让调用方决定
             return None
         except Exception as e:
-            self.logger.error(f"执行RCON命令失败: {e}")
+            self.logger.warning(f"执行RCON命令失败: {e}")
+            # 发生异常时关闭连接
+            self.close()
             return None
     
     def get_player_list(self) -> PlayerListInfo:

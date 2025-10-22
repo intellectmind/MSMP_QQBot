@@ -165,6 +165,9 @@ class ConsoleCommandHandler:
         elif system_command == 'stop':
             result = await self._handle_console_stop()
             print(result)
+        elif system_command == 'kill':
+            result = await self._handle_console_kill()
+            print(result)
         elif system_command == 'server_status':
             result = await self._get_server_process_status()
             print(result)
@@ -352,6 +355,13 @@ class ConsoleCommandHandler:
             self.logger.error(f"控制台停止服务器失败: {e}")
             return f"停止服务器失败: {e}"
 
+    async def _handle_console_kill(self) -> str:
+        """控制台直接强制杀死服务器 - 调用通用方法"""
+        if not self.bot.qq_server or not self.bot.qq_server.command_handlers:
+            return "命令处理器未初始化"
+        
+        return await self.bot.qq_server.command_handlers._execute_kill_command()
+
     async def _get_server_process_status(self) -> str:
         """获取服务器进程状态"""
         try:
@@ -489,6 +499,7 @@ class ConsoleCommandHandler:
 服务器管理命令 (使用 # 前缀):
   #start           - 启动Minecraft服务器
   #stop            - 停止Minecraft服务器
+  #kill            - 强制杀死服务器进程(不保存数据,紧急用)
   #server_status   - 查看服务器进程状态
 
 服务器查询命令 (使用 # 前缀):

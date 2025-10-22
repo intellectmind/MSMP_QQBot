@@ -3,12 +3,24 @@ import logging
 import asyncio
 import time
 import datetime
+import os
+import json
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
-import json
 from pathlib import Path
+
+
+@dataclass
+class TriggerHistory:
+    """触发历史记录"""
+    match_count: int = 0
+    last_match_time: float = 0
+    last_trigger_time: float = 0
+    trigger_times_today: int = 0 
+    last_reset_date: str = ""
+
 
 class RuleStatsPersistence:
     def __init__(self, stats_file: str = "logs/rule_stats.json"):
@@ -66,16 +78,6 @@ class Condition:
     def __post_init__(self):
         if self.params is None:
             self.params = {}
-
-
-@dataclass
-class TriggerHistory:
-    """触发历史记录"""
-    match_count: int = 0
-    last_match_time: float = 0
-    last_trigger_time: float = 0
-    trigger_times_today: int = 0 
-    last_reset_date: str = ""
 
 
 class ListenerRule:

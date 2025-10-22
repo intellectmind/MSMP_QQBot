@@ -79,10 +79,10 @@ class CommandHandler:
         self.logger.debug(f"已注册命令: {', '.join(names)}")
     
     async def handle_command(self, 
-                           command_text: str,
-                           user_id: int,
-                           group_id: int,
-                           **kwargs) -> Optional[str]:
+                       command_text: str,
+                       user_id: int,
+                       group_id: int,
+                       **kwargs) -> Optional[str]:
         """处理命令"""
         command_text = command_text.strip().lower()
         
@@ -92,15 +92,24 @@ class CommandHandler:
         if not command:
             return None
         
-        # 检查命令是否启用(管理员不受限制)
+        # 检查命令是否启用
         is_admin = self.config_manager.is_admin(user_id)
-        if not is_admin and command.command_key:
-            if not self.config_manager.is_command_enabled(command.command_key):
-                return None  # 命令被禁用,静默返回
+        
+        if command.admin_only:
+            # 管理员命令权限检查 - 管理员不受限制
+            if not is_admin and not self.config_manager.is_admin_command_enabled(command.names[0]):
+                return f"命令 {command.names[0]} 已被禁用"
+        else:
+            # 基础命令权限检查（管理员不受限制）
+            if not is_admin and command.command_key:
+                if not self.config_manager.is_command_enabled(command.command_key):
+                    return None  # 命令被禁用,静默返回
         
         # 检查管理员权限
         if command.admin_only and not is_admin:
-            return "权限不足:此命令仅限管理员使用"
+            # 如果非管理员要使用管理员命令，需要检查是否开放
+            if not self.config_manager.is_admin_command_enabled(command.names[0]):
+                return "权限不足:此命令仅限管理员使用"
         
         # 检查冷却时间
         can_use, remaining = self.rate_limiter.can_use(
@@ -137,7 +146,7 @@ class CommandHandler:
         except Exception as e:
             self.logger.error(f"执行命令 {command.names[0]} 时出错: {e}", exc_info=True)
             return f"命令执行失败: {str(e)}"
-    
+
     def get_help_message(self, user_id: int, detailed: bool = False) -> str:
         """获取帮助消息"""
         is_admin = self.config_manager.is_admin(user_id)
@@ -150,16 +159,14 @@ class CommandHandler:
             if command.names[0] not in seen_commands:
                 seen_commands.add(command.names[0])
                 
-                # 对于普通用户,检查命令是否启用
-                if not is_admin and command.command_key:
-                    if not self.config_manager.is_command_enabled(command.command_key):
-                        continue  # 跳过被禁用的命令
-                
                 if command.admin_only:
-                    if is_admin:
+                    # 管理员命令：管理员始终可见，非管理员只在启用时可见
+                    if is_admin or self.config_manager.is_admin_command_enabled(command.names[0]):
                         admin_commands.append(command)
                 else:
-                    basic_commands.append(command)
+                    # 基础命令：管理员始终可见，非管理员只在启用时可见
+                    if is_admin or (command.command_key and self.config_manager.is_command_enabled(command.command_key)):
+                        basic_commands.append(command)
         
         lines = ["MSMP_QQBot 命令帮助", "━━━━━━━━━━━━━━"]
         
@@ -171,7 +178,7 @@ class CommandHandler:
                 if cmd.description:
                     lines.append(f"  {cmd.description}")
         
-        if admin_commands and is_admin:
+        if admin_commands:
             lines.append("\n管理员命令:")
             for cmd in admin_commands:
                 aliases = " / ".join(cmd.names[:3])
@@ -181,22 +188,26 @@ class CommandHandler:
             
             lines.append("\n直接命令执行:")
             lines.append("• !<命令>")
-            lines.append("  管理员可使用 ! 前缀直接执行服务器命令,需启用RCON")
+            lines.append("  可使用 ! 前缀直接执行服务器命令,需启用RCON")
             lines.append("  示例: !say Hello 或 !give @a diamond")
-        
-        lines.append("\n━━━━━━━━━━━━━━")
-        lines.append("提示: 直接输入命令,无需斜杠")
-        
-        # 如果是管理员,显示禁用命令提示
+                
+        # 显示禁用命令提示（只对管理员显示）
         if is_admin:
             disabled_commands = []
+            
+            # 基础命令禁用列表
             for cmd_key, enabled in self.config_manager.get_enabled_commands().items():
                 if not enabled:
                     disabled_commands.append(cmd_key)
             
+            # 管理员命令禁用列表（对非管理员）
+            for cmd_key, enabled in self.config_manager.get_enabled_admin_commands().items():
+                if not enabled:
+                    disabled_commands.append(f"{cmd_key}(非管理员)")
+            
             if disabled_commands:
                 lines.append(f"\n已禁用命令: {', '.join(disabled_commands)}")
-                lines.append("(管理员仍可使用)")
+                lines.append("(管理员仍可使用所有命令)")
         
         return "\n".join(lines)
     
@@ -222,6 +233,8 @@ class CommandHandlers:
         self.rcon_client = rcon_client
         self.config_manager = config_manager
         self.logger = logger
+        self._stop_lock = asyncio.Lock()
+        self._is_stopping = False
     
     @property
     def msmp_client(self):
@@ -546,45 +559,149 @@ class CommandHandlers:
     
     async def handle_stop(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理stop命令(管理员) - 支持MSMP和RCON"""
+        
+        # 获取锁，确保 stop 命令只执行一次
+        async with self._stop_lock:
+            # 检查是否已经在停止中
+            if self._is_stopping:
+                return "服务器已在停止中，请勿重复执行"
+            
+            self._is_stopping = True
+        
         try:
             client_type, client = self._get_active_client()
             
             if not client:
-                return "服务器连接未就绪,无法执行停止命令"
+                self._is_stopping = False
+                return "服务器连接未就绪，无法执行停止命令"
             
-            # 发送执行中提示
+            # 发送执行中止消息
             if is_private:
                 await self.qq_server.send_private_message(websocket, user_id, "正在停止服务器...")
             else:
                 await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
             
-            if client_type == 'msmp':
-                # 检查服务器状态
-                try:
-                    status = client.get_server_status_sync()
-                    if not status.get('started', False):
-                        return "服务器已经是停止状态"
-                except Exception as e:
-                    self.logger.warning(f"获取服务器状态失败: {e}")
-                
-                result = client.execute_command_sync("server/stop")
-                
-                if 'result' in result:
-                    return None  # 不返回消息
-                else:
-                    error_msg = result.get('error', {}).get('message', '未知错误')
-                    return f"停止服务器失败: {error_msg}"
+            stop_success = False
+            stop_method = ""
             
-            else:  # rcon
-                success = client.stop_server()
-                if success:
-                    return None  # 不返回消息
+            try:
+                if client_type == 'msmp':
+                    stop_method = "MSMP"
+                    # MSMP: 执行停止命令
+                    result = client.execute_command_sync("server/stop")
+                    
+                    if 'result' not in result:
+                        error_msg = result.get('error', {}).get('message', '未知错误')
+                        self.logger.error(f"MSMP停止命令失败: {error_msg}")
+                    else:
+                        stop_success = True
+                        self.logger.info("MSMP 停止命令已发送")
+                    
+                elif client_type == 'rcon':
+                    stop_method = "RCON"
+                    # RCON: 执行停止命令
+                    result = client.execute_command("stop")
+                    
+                    if result is None:
+                        # RCON执行stop命令后连接会断开，返回None是正常的
+                        stop_success = True
+                        self.logger.info("RCON停止命令已发送(连接正常断开)")
+                    else:
+                        stop_success = True
+                        self.logger.info("RCON停止命令已发送")
+                    
+                    # RCON停止命令发送后立即关闭连接，避免后续错误
+                    if self.rcon_client and self.rcon_client.is_connected():
+                        try:
+                            self.rcon_client.close()
+                            self.logger.info("已关闭RCON连接")
+                        except Exception as e:
+                            self.logger.debug(f"关闭RCON连接时出错: {e}")
+            
+            except Exception as e:
+                self.logger.warning(f"执行停止命令时出现异常(可能是正常断开): {e}")
+                # 对于stop命令，某些异常可能是正常的（如连接断开）
+                stop_success = True
+            
+            if not stop_success:
+                self._is_stopping = False
+                return f"停止服务器失败: 无法通过{stop_method}发送停止命令"
+            
+            self.logger.info("停止命令已发送，等待服务器关闭进程...")
+            
+            # 等待服务器进程结束（最多60秒）
+            max_wait_time = 60
+            wait_interval = 5
+            waited_time = 0
+            
+            while (waited_time < max_wait_time and 
+                   self.qq_server.server_process and 
+                   self.qq_server.server_process.poll() is None):
+                await asyncio.sleep(wait_interval)
+                waited_time += wait_interval
+                self.logger.info(f"等待服务器关闭... ({waited_time}/{max_wait_time}秒)")
+            
+            # 检查服务器进程状态
+            server_stopped = True
+            if self.qq_server.server_process:
+                return_code = self.qq_server.server_process.poll()
+                if return_code is None:
+                    server_stopped = False
+                    self.logger.warning(f"服务器进程在{max_wait_time}秒后仍未关闭")
                 else:
-                    return "停止服务器失败"
-                
+                    self.logger.info(f"服务器进程已关闭，返回码: {return_code}")
+            
+            # 无论服务器是否完全关闭，都执行清理操作
+            self.logger.info("执行清理操作...")
+            await self._close_all_connections()
+            
+            if server_stopped:
+                return "服务器已成功关闭"
+            else:
+                return "停止命令已发送，但服务器进程仍在运行中。可能需要手动检查或使用 #kill 命令强制停止"
+            
         except Exception as e:
             self.logger.error(f"执行stop命令失败: {e}", exc_info=True)
+            try:
+                await self._close_all_connections()
+            except:
+                pass
             return f"停止服务器失败: {e}"
+        
+        finally:
+            # 重置停止标志
+            self._is_stopping = False
+
+    async def _close_all_connections(self):
+        """关闭所有连接"""
+        # 设置停止标志，防止继续处理日志
+        if self.qq_server:
+            self.qq_server.server_stopping = True
+        
+        # 首先关闭 RCON 连接（最重要）
+        if self.rcon_client:
+            try:
+                self.rcon_client.close()
+                self.logger.info("已关闭 RCON 连接")
+            except Exception as e:
+                self.logger.debug(f"关闭 RCON 连接出错: {e}")
+        
+        # 然后关闭 MSMP 连接
+        if self.msmp_client:
+            try:
+                await asyncio.wait_for(self.msmp_client.close(), timeout=5.0)
+                self.logger.info("已关闭 MSMP 连接")
+            except asyncio.TimeoutError:
+                self.logger.warning("MSMP 连接关闭超时")
+            except Exception as e:
+                self.logger.debug(f"关闭 MSMP 连接出错: {e}")
+        
+        # 关闭服务器日志文件
+        if self.qq_server:
+            try:
+                self.qq_server._close_log_file()
+            except Exception as e:
+                self.logger.debug(f"关闭日志文件出错: {e}")
     
     async def handle_start(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理start命令(管理员) - 支持MSMP和RCON"""
@@ -923,6 +1040,263 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"执行network命令失败: {e}", exc_info=True)
             return f"获取网络信息失败: {e}"
+
+    async def handle_kill(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理kill命令(管理员) - 调用通用方法"""
+        return await self._execute_kill_command(user_id, group_id, websocket, is_private)
+    
+    async def _execute_kill_command(self, user_id: int = 0, group_id: int = 0, websocket = None, is_private: bool = False) -> str:
+        """通用的kill命令执行方法"""
+        try:
+            if not self.qq_server or not self.qq_server.server_process:
+                return "服务器进程未运行"
+            
+            # 检查进程是否还在运行
+            if self.qq_server.server_process.poll() is not None:
+                return "服务器进程已经停止"
+            
+            # 发送执行中止提示（如果有websocket连接）
+            if websocket and not websocket.closed:
+                if is_private:
+                    await self.qq_server.send_private_message(websocket, user_id, "正在强制中止服务器进程并彻底清理...")
+                else:
+                    await self.qq_server.send_group_message(websocket, group_id, "正在强制中止服务器进程并彻底清理...")
+            else:
+                # 控制台版本
+                print("正在强制杀死Minecraft服务器并彻底清理...")
+            
+            self.logger.info(f"{'控制台' if user_id == 0 else f'用户 {user_id}'} 执行强制中止服务器命令")
+            
+            # 第一步：先关闭所有连接
+            await self._close_all_connections()
+            
+            # 第二步：强制杀死进程
+            import signal
+            import os
+            import subprocess
+            
+            try:
+                pid = self.qq_server.server_process.pid
+                self.logger.info(f"强制终止进程 {pid}")
+                
+                if os.name == 'nt':  # Windows
+                    # 使用 taskkill 强制终止进程树
+                    try:
+                        result = subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(pid)], 
+                            timeout=10, 
+                            capture_output=True, 
+                            text=True
+                        )
+                        if result.returncode == 0:
+                            self.logger.info(f"已强制终止进程树 {pid}")
+                        else:
+                            self.logger.warning(f"taskkill 返回非零状态: {result.returncode}")
+                            # 备用方法
+                            os.kill(pid, signal.SIGTERM)
+                    except subprocess.TimeoutExpired:
+                        self.logger.warning("taskkill 超时，尝试其他方法")
+                        os.kill(pid, signal.SIGTERM)
+                    except Exception as e:
+                        self.logger.warning(f"taskkill 失败: {e}")
+                        os.kill(pid, signal.SIGTERM)
+                else:  # Linux/Mac
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    
+            except ProcessLookupError:
+                self.logger.info("进程已不存在")
+            except Exception as e:
+                self.logger.error(f"强制中止进程失败: {e}")
+                return f"强制中止失败: {e}"
+            
+            # 第三步：等待进程结束
+            try:
+                await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.qq_server.server_process.wait
+                    ),
+                    timeout=10.0
+                )
+                self.logger.info("进程已确认终止")
+            except asyncio.TimeoutError:
+                self.logger.warning("进程在10秒内未响应，尝试强制杀死")
+                try:
+                    if os.name == 'nt':
+                        os.kill(pid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                except:
+                    pass
+            
+            # 第四步：彻底清理端口占用和文件锁
+            await self._thorough_cleanup()
+            
+            # 第五步：清理进程引用和文件
+            self.qq_server.server_process = None
+            self.qq_server._close_log_file()
+            
+            return "服务器进程已强制中止，所有连接和端口已彻底清理"
+            
+        except Exception as e:
+            self.logger.error(f"执行kill命令失败: {e}", exc_info=True)
+            return f"强制中止失败: {e}"
+
+    async def _thorough_cleanup(self):
+        """彻底清理所有残留"""
+        try:
+            self.logger.info("开始彻底清理残留资源...")
+            
+            # 1. 强制清理文件锁
+            await self._force_clean_file_locks()
+            
+            # 2. 等待确保所有资源释放
+            await asyncio.sleep(3)
+            
+            self.logger.info("彻底清理完成")
+            
+        except Exception as e:
+            self.logger.error(f"彻底清理失败: {e}")
+
+    async def _clean_port(self, port: int, service_name: str):
+        """清理指定端口"""
+        try:
+            if await self._is_port_in_use('localhost', port):
+                self.logger.warning(f"{service_name}端口 {port} 被占用，正在清理...")
+                
+                # 使用多种方法清理端口
+                await self._kill_process_by_port(port)
+                await asyncio.sleep(2)
+                
+                # 验证清理结果
+                if await self._is_port_in_use('localhost', port):
+                    self.logger.error(f"{service_name}端口 {port} 清理失败")
+                else:
+                    self.logger.info(f"{service_name}端口 {port} 已释放")
+                    
+        except Exception as e:
+            self.logger.error(f"清理{service_name}端口失败: {e}")
+
+    async def _kill_process_by_port(self, port: int):
+        """通过端口号杀死进程"""
+        try:
+            import subprocess
+            
+            # 方法1: 使用 netstat + taskkill
+            result = subprocess.run(
+                ['netstat', '-ano', '-p', 'TCP'], 
+                capture_output=True, text=True, timeout=10
+            )
+            
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if f':{port}' in line and 'LISTENING' in line:
+                        parts = line.split()
+                        if len(parts) >= 5:
+                            pid = parts[-1]
+                            self.logger.info(f"发现进程 {pid} 占用端口 {port}")
+                            
+                            # 强制终止进程
+                            subprocess.run(
+                                ['taskkill', '/F', '/T', '/PID', pid],
+                                capture_output=True, timeout=10
+                            )
+            
+            # 方法2: 使用 PowerShell (备用)
+            ps_cmd = f"Get-NetTCPConnection -LocalPort {port} | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force }}"
+            subprocess.run(
+                ['powershell', '-Command', ps_cmd],
+                capture_output=True, timeout=10
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"通过端口杀死进程失败: {e}")
+
+    async def _force_clean_file_locks(self):
+        """强制清理文件锁"""
+        try:
+            working_dir = self.config_manager.get_server_working_directory()
+            if not working_dir:
+                start_script = self.config_manager.get_server_start_script()
+                working_dir = os.path.dirname(start_script)
+                
+            import time
+            
+            files_to_clean = [
+                os.path.join(working_dir, "session.lock"),
+                os.path.join(working_dir, "world", "session.lock"),
+                os.path.join(working_dir, "world_nether", "session.lock"),
+                os.path.join(working_dir, "world_the_end", "session.lock"),
+            ]
+            
+            for file_path in files_to_clean:
+                if os.path.exists(file_path):
+                    try:
+                        # 多次尝试删除
+                        for attempt in range(3):
+                            try:
+                                os.remove(file_path)
+                                self.logger.info(f"已删除: {file_path}")
+                                break
+                            except Exception:
+                                if attempt < 2:
+                                    await asyncio.sleep(1)
+                                else:
+                                    raise
+                    except Exception as e:
+                        self.logger.warning(f"无法删除 {file_path}: {e}")
+                        
+        except Exception as e:
+            self.logger.error(f"强制清理文件锁失败: {e}")
+
+    async def _is_port_in_use(self, host: str, port: int) -> bool:
+        """检查端口是否被占用"""
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                result = s.connect_ex((host, port))
+                return result == 0
+        except:
+            return False
+    
+    async def handle_crash(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理crash命令(管理员) - 获取最新的崩溃报告"""
+        try:
+            import os
+            from pathlib import Path
+            
+            # 从 working_directory 查找 crash-reports
+            working_dir = self.config_manager.get_server_working_directory()
+            if not working_dir:
+                start_script = self.config_manager.get_server_start_script()
+                working_dir = os.path.dirname(start_script)
+            
+            crash_dir = os.path.join(working_dir, "crash-reports")
+            crash_path = Path(crash_dir)
+            
+            if not crash_path.exists():
+                return f"crash-reports 目录不存在: {crash_dir}"
+            
+            # 查找所有crash文件
+            crash_files = list(crash_path.glob("crash-*.txt"))
+            
+            if not crash_files:
+                return "未找到任何崩溃报告"
+            
+            # 按修改时间排序，获取最新的
+            latest_crash = max(crash_files, key=lambda p: p.stat().st_mtime)
+            
+            self.logger.info(f"找到最新崩溃报告: {latest_crash.name}")
+            
+            # 发送文件
+            await self.qq_server._send_crash_report_file(websocket, user_id, group_id, str(latest_crash), is_private)
+            
+            return None  # 文件已通过 _send_crash_report_file 发送
+            
+        except Exception as e:
+            self.logger.error(f"处理崩溃报告失败: {e}", exc_info=True)
+            return f"处理崩溃报告失败: {e}"
 
     async def handle_listeners(self, **kwargs) -> str:
         """处理 listeners 命令 - 显示所有自定义监听规则"""

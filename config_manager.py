@@ -131,7 +131,7 @@ class ConfigManager:
                 'password': 'your_msmp_password_here'
             },
             'rcon': {
-                'enabled': False,
+                'enabled': True,
                 'host': 'localhost',
                 'port': 25575,
                 'password': 'your_rcon_password_here'
@@ -154,6 +154,9 @@ class ConfigManager:
             },
             'commands': {
                 'tps_command': 'tps',
+                'tps_regex': r'TPS from last 1m, 5m, 15m:\s*([\d.]+)',
+                'tps_group_index': 1,
+                'tps_show_raw_output': True,
                 'enabled_commands': {
                     'list': True,
                     'tps': True,
@@ -180,7 +183,7 @@ class ConfigManager:
             },
             'notifications': {
                 'server_events': True,
-                'player_events': True,
+                'player_events': False,
                 'log_messages': False,
                 'chunk_monitor': {
                     'enabled': True,
@@ -310,6 +313,10 @@ class ConfigManager:
             if not isinstance(enabled, bool):
                 errors.append(f"管理员命令 {cmd_name} 的启用状态必须是布尔值")
 
+        # TPS配置验证
+        tps_errors = self._validate_tps_config()
+        errors.extend(tps_errors)
+
         listener_errors = self._validate_custom_listeners()
         errors.extend(listener_errors)
         
@@ -334,6 +341,42 @@ class ConfigManager:
             
         except Exception as e:
             errors.append(f"验证自定义监听器配置时出错: {e}")
+        
+        return errors
+    
+    def _validate_tps_config(self) -> List[str]:
+        """验证TPS相关配置"""
+        errors = []
+        
+        try:
+            commands_config = self.config.get('commands', {})
+            
+            # 验证 tps_regex
+            tps_regex = commands_config.get('tps_regex', '')
+            if tps_regex:
+                try:
+                    re.compile(tps_regex)
+                except re.error as e:
+                    errors.append(f"TPS正则表达式语法错误: {e}")
+            else:
+                errors.append("TPS正则表达式不能为空")
+            
+            # 验证 tps_group_index
+            tps_group_index = commands_config.get('tps_group_index', 1)
+            if not isinstance(tps_group_index, int):
+                errors.append(f"tps_group_index 必须是整数,当前值: {tps_group_index}")
+            elif tps_group_index < 1:
+                errors.append(f"tps_group_index 必须大于等于1,当前值: {tps_group_index}")
+            elif tps_group_index > 10:
+                errors.append(f"tps_group_index 过大(建议不超过10),当前值: {tps_group_index}")
+            
+            # 验证 tps_show_raw_output
+            tps_show_raw = commands_config.get('tps_show_raw_output', True)
+            if not isinstance(tps_show_raw, bool):
+                errors.append(f"tps_show_raw_output 必须是布尔值,当前值: {tps_show_raw}")
+            
+        except Exception as e:
+            errors.append(f"验证TPS配置时出错: {e}")
         
         return errors
     
@@ -481,6 +524,18 @@ class ConfigManager:
     # ============ 命令配置 ============
     def get_tps_command(self) -> str:
         return self.config.get('commands', {}).get('tps_command', 'tps')
+
+    def get_tps_regex(self) -> str:
+        """获取TPS正则表达式"""
+        return self.config.get('commands', {}).get('tps_regex', 'TPS from last 1m, 5m, 15m:\\s*([\\d.]+)')
+
+    def get_tps_group_index(self) -> int:
+        """获取TPS正则表达式的捕获组索引"""
+        return self.config.get('commands', {}).get('tps_group_index', 1)
+
+    def is_tps_raw_output_enabled(self) -> bool:
+        """是否输出原始TPS返回值"""
+        return self.config.get('commands', {}).get('tps_show_raw_output', True)
 
     def is_command_enabled(self, command_name: str) -> bool:
         """检查基础命令是否启用（管理员不受此限制）"""

@@ -279,14 +279,16 @@ class ListenerRule:
     def update_history(self, triggered: bool = True, persistence=None):
         """更新触发历史"""
         today = datetime.date.today().isoformat()
+        
+        # 检查是否需要重置日期
         if today != self.history.last_reset_date:
             self.history.trigger_times_today = 0
             self.history.last_reset_date = today
         
-        self.history.match_count += 1
-        self.history.last_match_time = time.time()
-        
+        # 只有触发时才增加这些计数
         if triggered:
+            self.history.match_count += 1
+            self.history.last_match_time = time.time()
             self.history.last_trigger_time = time.time()
             self.history.trigger_times_today += 1
         
@@ -295,9 +297,9 @@ class ListenerRule:
             persistence.save_rule_history(self.name, self.history)
     
     def format_message(self, 
-                      match: re.Match, 
-                      template: str, 
-                      context: Dict[str, Any] = None) -> str:
+                  match: re.Match, 
+                  template: str, 
+                  context: Dict[str, Any] = None) -> str:
         """格式化消息模板"""
         if not template:
             return template
@@ -309,8 +311,8 @@ class ListenerRule:
         result = result.replace("{match}", match.group(0))
         result = result.replace("{match_full}", match.group(0))
         result = result.replace("{rule_name}", self.name)
-        result = result.replace("{match_count}", str(self.history.match_count))
-        result = result.replace("{trigger_today}", str(self.history.trigger_times_today))
+        result = result.replace("{match_count}", str(self.history.match_count + 1))
+        result = result.replace("{trigger_today}", str(self.history.trigger_times_today + 1))
         
         if self.history.last_match_time > 0:
             last_time = datetime.datetime.fromtimestamp(self.history.last_match_time)
@@ -324,16 +326,22 @@ class ListenerRule:
         result = result.replace("{date}", now.strftime('%Y-%m-%d'))
         result = result.replace("{time}", now.strftime('%H:%M:%S'))
         result = result.replace("{weekday}", ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][now.weekday()])
-        result = result.replace("{server_tps}", str(context.get('server_tps', 'N/A')))
-        result = result.replace("{player_count}", str(context.get('player_count', 0)))
-        result = result.replace("{memory_usage}", str(context.get('memory_usage', 'N/A')))
+        
+        # 获取实时的服务器状态
+        server_tps = context.get('server_tps', 20.0)
+        player_count = context.get('player_count', 0)
+        memory_usage = context.get('memory_usage', 0.0)
+        
+        result = result.replace("{server_tps}", f"{server_tps:.1f}" if isinstance(server_tps, (int, float)) else str(server_tps))
+        result = result.replace("{player_count}", str(player_count))
+        result = result.replace("{memory_usage}", f"{memory_usage:.1f}" if isinstance(memory_usage, (int, float)) else str(memory_usage))
         
         # 正则表达式捕获组占位符
         for i, group in enumerate(match.groups()):
             if group is not None:
                 result = result.replace(f"{{group{i+1}}}", group)
         
-        # 函数式占位符处理
+        # 处理函数式占位符
         result = self._process_functional_placeholders(result, match, context)
         
         return result
@@ -412,8 +420,8 @@ class ListenerRule:
         system_vars = {
             "timestamp": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "rule_name": self.name,
-            "match_count": str(self.history.match_count),
-            "trigger_today": str(self.history.trigger_times_today)
+            "match_count": str(self.history.match_count + 1),
+            "trigger_today": str(self.history.trigger_times_today + 1)
         }
         if var_name in system_vars:
             return system_vars[var_name]
@@ -568,7 +576,7 @@ class CustomMessageListener:
 
         matched_rules = []
         
-        # 优先使用传入的context，如果没有才生成
+        # 使用传入的context，如果没有则生成
         if context is None:
             context = self.get_context()
         else:
@@ -580,26 +588,39 @@ class CustomMessageListener:
         for rule in self.rules:
             try:
                 match = rule.match(log_line)
+                
                 if match:
-                    rule.update_history(triggered=False)
-                    self.rule_stats[rule.name]["total"] += 1
-                    
+                    # 第一步：检查是否可以触发（包含各种限制）
                     if rule.can_trigger(context):
                         matched_rules.append(rule.name)
                         
                         self.logger.info(f"消息匹配规则: {rule.name}, 内容: {log_line[:100]}")
                         
+                        # 第二步：格式化消息
                         if rule.qq_message:
                             qq_message = rule.format_message(match, rule.qq_message, context)
                             await self._send_qq_messages(websocket, group_ids, qq_message)
                         
+                        # 第三步：执行服务器命令
                         if rule.server_command:
                             server_command = rule.format_message(match, rule.server_command, context)
                             if server_executor:
                                 await self._execute_server_command(server_executor, server_command)
                         
-                        rule.update_history(triggered=True)
+                        # 第四步：更新历史记录（只有触发时才更新）
+                        rule.update_history(triggered=True, persistence=self.persistence)
+                    else:
+                        # 即使不能触发，也要记录匹配（用于调试）
+                        if self.logger.isEnabledFor(logging.DEBUG):
+                            self.logger.debug(f"规则 {rule.name} 匹配但不满足触发条件")
                     
+                    # 第五步：更新统计信息
+                    self.rule_stats[rule.name]["total"] += 1
+                        
+                else:
+                    # 不匹配，跳过
+                    pass
+                        
             except Exception as e:
                 self.logger.error(f"处理规则 {rule.name} 时出错: {e}", exc_info=True)
                 self.rule_stats[rule.name]["errors"] += 1
@@ -668,13 +689,13 @@ class CustomMessageListener:
             lines.append(f"  正则: {rule.pattern}")
             
             if rule.trigger_limit > 0:
-                lines.append(f"  触发限制: {rule.trigger_limit} 次 (已触发 {rule.history.match_count} 次)")
+                lines.append(f"  触发限制: {rule.trigger_limit} 次 (已触发 {rule.history.match_count + 1} 次)")
             
             if rule.trigger_cooldown > 0:
                 lines.append(f"  冷却时间: {rule.trigger_cooldown} 秒")
             
             if rule.daily_limit > 0:
-                lines.append(f"  每日限制: {rule.daily_limit} 次 (今天已触发 {rule.history.trigger_times_today} 次)")
+                lines.append(f"  每日限制: {rule.daily_limit} 次 (今天已触发 {rule.history.trigger_times_today + 1} 次)")
             
             if rule.conditions:
                 lines.append("  执行条件:")
@@ -689,7 +710,7 @@ class CustomMessageListener:
                 cmd_preview = rule.server_command[:50] + "..." if len(rule.server_command) > 50 else rule.server_command
                 lines.append(f"  服务器命令: {cmd_preview}")
             
-            lines.append(f"  统计: 匹配 {rule.history.match_count} 次")
+            lines.append(f"  统计: 匹配 {rule.history.match_count + 1} 次")
             if rule.history.last_match_time > 0:
                 last_time = datetime.datetime.fromtimestamp(rule.history.last_match_time)
                 lines.append(f"  最后匹配: {last_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -741,3 +762,15 @@ class CustomMessageListener:
             }
         
         return stats
+
+    def _get_real_time_tps(self) -> float:
+        """获取实时TPS值（如果可用）"""
+        try:
+            # 如果有注册的上下文提供器提供了 server_tps，使用该值
+            # 否则返回默认值
+            if hasattr(self, '_last_tps'):
+                return self._last_tps
+            return 20.0
+        except Exception as e:
+            self.logger.debug(f"获取实时TPS失败: {e}")
+            return 20.0

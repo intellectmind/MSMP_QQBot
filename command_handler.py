@@ -312,14 +312,150 @@ class CommandHandlers:
             result = client.execute_command(tps_command)
             
             if result:
-                cleaned = re.sub(r'Â§[0-9a-fk-or]', '', result).strip()
-                return f"服务器TPS信息:\n{cleaned}\n\n[通过 RCON 查询]"
+                # 第一步：清理Minecraft颜色代码 (§[0-9a-fk-or] 或 &[0-9a-fk-or])
+                cleaned = re.sub(r'[§&][0-9a-fk-orA-FK-OR]', '', result).strip()
+                
+                self.logger.debug(f"原始TPS返回: {result}")
+                self.logger.debug(f"清理后的TPS返回: {cleaned}")
+                
+                # 第二步：尝试使用正则表达式提取TPS值
+                tps_value = self._extract_tps_value(cleaned)
+                
+                # 第三步：构建响应消息
+                message_lines = ["服务器TPS信息:"]
+                message_lines.append("=" * 20)
+                
+                if tps_value is not None:
+                    # 评估TPS状态
+                    tps_status = self._evaluate_tps_status(tps_value)
+                    message_lines.append(f"解析的TPS值: {tps_value:.1f} {tps_status}")
+                else:
+                    message_lines.append(" 无法解析TPS值，请查看原始信息")
+                    # 当无法解析时，记录调试信息
+                    self.logger.warning(
+                        f"TPS值解析失败\n"
+                        f"正则表达式: {self.config_manager.get_tps_regex()}\n"
+                        f"捕获组索引: {self.config_manager.get_tps_group_index()}\n"
+                        f"清理后的文本: {cleaned}"
+                    )
+                
+                # 第四步：是否显示原始输出
+                if self.config_manager.is_tps_raw_output_enabled():
+                    message_lines.append("")
+                    message_lines.append("服务器原始TPS信息:")
+                    message_lines.append("-" * 20)
+                    message_lines.append(cleaned)
+                
+                message_lines.append("=" * 20)
+                message_lines.append("[通过 RCON 查询]")
+                
+                return "\n".join(message_lines)
             else:
                 return "TPS命令执行成功,但无返回结果"
                     
         except Exception as e:
             self.logger.error(f"执行TPS命令失败: {e}", exc_info=True)
             return f"获取TPS信息失败: {e}"
+
+
+    def _extract_tps_value(self, text: str) -> Optional[float]:
+        """从服务器返回的文本中提取TPS值"""
+        try:
+            tps_regex = self.config_manager.get_tps_regex()
+            tps_group_index = self.config_manager.get_tps_group_index()
+            
+            # 验证group_index的有效性
+            if tps_group_index < 1:
+                self.logger.warning(f"无效的tps_group_index: {tps_group_index}, 使用默认值1")
+                tps_group_index = 1
+            
+            # 使用提供的正则表达式进行匹配
+            pattern = re.compile(tps_regex, re.IGNORECASE)
+            match = pattern.search(text)
+            
+            if match:
+                # 获取指定的捕获组
+                try:
+                    tps_str = match.group(tps_group_index)
+                    tps_value = float(tps_str)
+                    
+                    # 验证TPS值的合理性（0-20之间）
+                    if 0 <= tps_value <= 20:
+                        self.logger.debug(f"成功提取TPS值: {tps_value}")
+                        return tps_value
+                    else:
+                        self.logger.warning(f"TPS值超出合理范围: {tps_value}")
+                        return None
+                        
+                except (IndexError, ValueError) as e:
+                    self.logger.warning(f"提取捕获组失败 (group {tps_group_index}): {e}")
+                    return None
+            else:
+                self.logger.warning(f"正则表达式未匹配: {tps_regex}")
+                self.logger.debug(f"尝试匹配的文本: {text[:200]}")
+                
+                # 第五步：如果第一次匹配失败，尝试更宽松的正则表达式
+                # 这可以处理一些不标准的格式
+                fallback_patterns = [
+                    r'(\d+(?:\.\d+)?)',  # 任何数字或浮点数
+                    r'TPS[:\s]+(\d+(?:\.\d+)?)',  # TPS: 数字
+                    r'(\d+(?:\.\d+)?)\s*(?:tps|TPS)',  # 数字 TPS
+                ]
+                
+                for fallback_regex in fallback_patterns:
+                    try:
+                        fallback_pattern = re.compile(fallback_regex, re.IGNORECASE)
+                        fallback_match = fallback_pattern.search(text)
+                        if fallback_match:
+                            fallback_tps_str = fallback_match.group(1)
+                            fallback_tps_value = float(fallback_tps_str)
+                            if 0 <= fallback_tps_value <= 20:
+                                self.logger.info(
+                                    f"使用备用正则表达式成功提取TPS值: {fallback_tps_value}\n"
+                                    f"备用正则: {fallback_regex}"
+                                )
+                                return fallback_tps_value
+                    except Exception as e:
+                        self.logger.debug(f"备用正则表达式匹配失败 ({fallback_regex}): {e}")
+                        continue
+                
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"提取TPS值时出错: {e}")
+            return None
+
+
+    def _evaluate_tps_status(self, tps_value: float) -> str:
+        """评估TPS状态并返回状态标签"""
+        if tps_value >= 19.5:
+            return "优秀"
+        elif tps_value >= 15:
+            return "良好"
+        elif tps_value >= 10:
+            return "一般"
+        elif tps_value >= 5:
+            return "较差"
+        else:
+            return "很差"
+
+
+    # 清理Minecraft格式代码
+    @staticmethod
+    def _clean_minecraft_colors(text: str) -> str:
+        """清理Minecraft颜色代码和格式代码
+        
+        支持以下格式:
+        - §[0-9a-fk-or] - Minecraft标准颜色代码
+        - &[0-9a-fk-or] - 另一种常见格式
+        """
+        # 清理 § 格式的颜色代码
+        text = re.sub(r'§[0-9a-fk-orA-FK-OR]', '', text)
+        # 清理 & 格式的颜色代码
+        text = re.sub(r'&[0-9a-fk-orA-FK-OR]', '', text)
+        # 清理其他常见的ANSI转义序列
+        text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        return text
         
     async def handle_rules(self, **kwargs) -> str:
         """处理rules命令"""

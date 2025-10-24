@@ -5,6 +5,7 @@ import subprocess
 import os
 import sys
 import re
+import psutil
 import asyncio
 from typing import List, Dict, Any, Optional
 import time
@@ -874,17 +875,15 @@ class QQBotWebSocketServer:
                     if self.logger.isEnabledFor(logging.DEBUG):
                         self.logger.debug("服务器连接已断开，跳过日志处理")
                     return
-                
-                # 获取实际的玩家数
+                                
+                # 1. 获取实时玩家数量
                 player_count = 0
                 try:
-                    # 优先使用RCON（同步，快速）
                     if rcon_connected:
                         player_info = self.rcon_client.get_player_list()
                         player_count = player_info.current_players
                         if self.logger.isEnabledFor(logging.DEBUG):
                             self.logger.debug(f"通过RCON获取玩家数: {player_count}")
-                    # 其次尝试MSMP（异步）
                     elif msmp_connected:
                         try:
                             player_info = await asyncio.wait_for(
@@ -901,11 +900,45 @@ class QQBotWebSocketServer:
                         self.logger.debug(f"获取玩家数失败: {e}")
                     player_count = 0
                 
-                # 构建上下文
+                # 2. 获取实时的TPS值
+                server_tps = 20.0
+                try:
+                    if rcon_connected:
+                        tps_command = self.config_manager.get_tps_command()
+                        tps_result = self.rcon_client.execute_command(tps_command)
+                        
+                        if tps_result:
+                            # 清理颜色代码
+                            cleaned_tps = re.sub(r'[§&][0-9a-fk-orA-FK-OR]', '', tps_result).strip()
+                            
+                            # 使用与handle_tps相同的正则提取逻辑
+                            tps_value = self._extract_tps_from_text(cleaned_tps)
+                            if tps_value is not None:
+                                server_tps = tps_value
+                                if self.logger.isEnabledFor(logging.DEBUG):
+                                    self.logger.debug(f"从RCON获取实时TPS: {server_tps}")
+                except Exception as e:
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(f"获取TPS失败: {e}")
+                    server_tps = 20.0
+                
+                # 3. 获取实时内存使用率
+                memory_usage = 0.0
+                try:
+                    memory = psutil.virtual_memory()
+                    memory_usage = memory.percent
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(f"获取内存使用率: {memory_usage}%")
+                except Exception as e:
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(f"获取内存信息失败: {e}")
+                    memory_usage = 0.0
+                
+                # 构建完整的上下文
                 context = {
                     'player_count': player_count,
-                    'server_tps': 20.0,
-                    'memory_usage': 0.0,
+                    'server_tps': server_tps,
+                    'memory_usage': memory_usage,
                 }
                 
                 # 处理自定义监听规则
@@ -919,6 +952,66 @@ class QQBotWebSocketServer:
         except Exception as e:
             self.logger.error(f"处理自定义监听规则失败: {e}", exc_info=True)
     
+    def _extract_tps_from_text(self, text: str) -> Optional[float]:
+        """从文本中提取TPS值 - 复用handle_tps的逻辑
+        
+        Args:
+            text: 已清理颜色代码的文本
+            
+        Returns:
+            TPS值或None
+        """
+        try:
+            tps_regex = self.config_manager.get_tps_regex()
+            tps_group_index = self.config_manager.get_tps_group_index()
+            
+            if tps_group_index < 1:
+                tps_group_index = 1
+            
+            pattern = re.compile(tps_regex, re.IGNORECASE)
+            match = pattern.search(text)
+            
+            if match:
+                try:
+                    tps_str = match.group(tps_group_index)
+                    tps_value = float(tps_str)
+                    
+                    if 0 <= tps_value <= 20:
+                        return tps_value
+                    else:
+                        self.logger.debug(f"TPS值超出范围: {tps_value}")
+                        return None
+                except (IndexError, ValueError) as e:
+                    self.logger.debug(f"提取TPS捕获组失败: {e}")
+                    return None
+            else:
+                # 尝试备用正则
+                fallback_patterns = [
+                    r'(\d+(?:\.\d+)?)',
+                    r'TPS[:\s]+(\d+(?:\.\d+)?)',
+                    r'(\d+(?:\.\d+)?)\s*(?:tps|TPS)',
+                ]
+                
+                for fallback_regex in fallback_patterns:
+                    try:
+                        fallback_pattern = re.compile(fallback_regex, re.IGNORECASE)
+                        fallback_match = fallback_pattern.search(text)
+                        if fallback_match:
+                            fallback_tps_str = fallback_match.group(1)
+                            fallback_tps_value = float(fallback_tps_str)
+                            if 0 <= fallback_tps_value <= 20:
+                                self.logger.debug(f"使用备用正则提取TPS: {fallback_tps_value}")
+                                return fallback_tps_value
+                    except Exception as e:
+                        self.logger.debug(f"备用正则失败: {e}")
+                        continue
+                
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"提取TPS值时出错: {e}")
+            return None
+
     def _is_chunk_monitor_message(self, log_line: str) -> bool:
         """检查是否是区块监控消息"""
         return bool(re.search(r'\[chunkmonitor\].*?\[区块监控\].*?世界', log_line, re.IGNORECASE))

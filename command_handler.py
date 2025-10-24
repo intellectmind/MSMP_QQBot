@@ -92,7 +92,7 @@ class CommandHandler:
         if not command:
             return None
         
-        # 检查命令是否启用
+        # 检查命令是否可用
         is_admin = self.config_manager.is_admin(user_id)
         
         if command.admin_only:
@@ -119,7 +119,7 @@ class CommandHandler:
         )
         
         if not can_use:
-            return f"命令冷却中,请等待 {remaining} 秒"
+            return f"命令冷却中,请等待 {remaining} 秒'"
         
         # 执行命令
         try:
@@ -153,6 +153,7 @@ class CommandHandler:
         
         basic_commands = []
         admin_commands = []
+        enabled_admin_commands = []  # 对非管理员开放的管理员命令
         
         seen_commands = set()
         for name, command in self.commands.items():
@@ -160,15 +161,17 @@ class CommandHandler:
                 seen_commands.add(command.names[0])
                 
                 if command.admin_only:
-                    # 管理员命令：管理员始终可见，非管理员只在启用时可见
-                    if is_admin or self.config_manager.is_admin_command_enabled(command.names[0]):
+                    if is_admin:
                         admin_commands.append(command)
+                    else:
+                        # 检查这个管理员命令是否对非管理员开放
+                        if self.config_manager.is_admin_command_enabled(command.names[0]):
+                            enabled_admin_commands.append(command)
                 else:
-                    # 基础命令：管理员始终可见，非管理员只在启用时可见
                     if is_admin or (command.command_key and self.config_manager.is_command_enabled(command.command_key)):
                         basic_commands.append(command)
         
-        lines = ["MSMP_QQBot 命令帮助", "━━━━━━━━━━━━━━"]
+        lines = ["MSMP_QQBot 命令帮助", "══════════════"]
         
         if basic_commands:
             lines.append("\n基础命令:")
@@ -177,9 +180,20 @@ class CommandHandler:
                 lines.append(f"• {aliases}")
                 if cmd.description:
                     lines.append(f"  {cmd.description}")
+                if cmd.usage and detailed:
+                    lines.append(f"  用法: {cmd.usage}")
+        
+        # 对非管理员显示开放的管理员命令
+        if not is_admin and enabled_admin_commands:
+            lines.append("\n开放的管理员命令:")
+            for cmd in enabled_admin_commands:
+                aliases = " / ".join(cmd.names[:3])
+                lines.append(f"• {aliases}")
+                if cmd.description:
+                    lines.append(f"  {cmd.description}")
         
         if admin_commands:
-            lines.append("\n管理员命令:")
+            lines.append("\n管理员专属命令:")
             for cmd in admin_commands:
                 aliases = " / ".join(cmd.names[:3])
                 lines.append(f"• {aliases}")
@@ -188,26 +202,30 @@ class CommandHandler:
             
             lines.append("\n直接命令执行:")
             lines.append("• !<命令>")
-            lines.append("  可使用 ! 前缀直接执行服务器命令,需启用RCON")
+            lines.append("  使用 ! 前缀直接执行服务器命令")
             lines.append("  示例: !say Hello 或 !give @a diamond")
-                
-        # 显示禁用命令提示（只对管理员显示）
+        
+        # 显示禁用命令提示（仅对管理员显示）
         if is_admin:
             disabled_commands = []
             
-            # 基础命令禁用列表
             for cmd_key, enabled in self.config_manager.get_enabled_commands().items():
                 if not enabled:
                     disabled_commands.append(cmd_key)
             
-            # 管理员命令禁用列表（对非管理员）
             for cmd_key, enabled in self.config_manager.get_enabled_admin_commands().items():
                 if not enabled:
                     disabled_commands.append(f"{cmd_key}(非管理员)")
             
             if disabled_commands:
                 lines.append(f"\n已禁用命令: {', '.join(disabled_commands)}")
-                lines.append("(管理员仍可使用所有命令)")
+        
+        # 添加使用提示
+        if not is_admin:
+            lines.append(f"\n提示: 当前有 {len(enabled_admin_commands)} 个管理员命令对您开放")
+            lines.append("   如需更多权限，请联系管理员")
+        else:
+            lines.append(f"\n您是管理员，可以使用所有 {len(admin_commands)} 个管理员命令")
         
         return "\n".join(lines)
     
@@ -227,52 +245,41 @@ class CommandHandlers:
     """命令处理器集合"""
     
     def __init__(self, msmp_client, rcon_client, qq_server, config_manager, logger):
-        # 不直接保存 msmp_client,而是保存 qq_server
-        # 然后通过 qq_server.msmp_client 动态获取
         self.qq_server = qq_server
         self.rcon_client = rcon_client
         self.config_manager = config_manager
         self.logger = logger
         self._stop_lock = asyncio.Lock()
         self._is_stopping = False
+        self._shutdown_event = asyncio.Event()
+        self._shutdown_initiated = False
     
     @property
     def msmp_client(self):
         """动态获取 msmp_client"""
         return self.qq_server.msmp_client if self.qq_server else None
     
-    def _get_active_client(self):
-        """获取当前可用的客户端(优先MSMP,其次RCON)"""
-        # 如果MSMP已启用且连接正常,使用MSMP
-        if (self.config_manager.is_msmp_enabled() and 
-            self.msmp_client and 
-            self.msmp_client.is_connected()):
-            return 'msmp', self.msmp_client
-        
-        # 否则尝试使用RCON
-        if (self.config_manager.is_rcon_enabled() and 
-            self.rcon_client and 
-            self.rcon_client.is_connected()):
-            return 'rcon', self.rcon_client
-        
-        return None, None
+    def set_shutdown_mode(self):
+        """设置关闭模式，停止所有连接检测"""
+        self._shutdown_event.set()
+        self._is_stopping = True
+        self.logger.info("已进入关闭模式，停止所有连接检测")
     
     async def handle_list(self, **kwargs) -> str:
-        """处理list命令 - 支持MSMP和RCON自动切换"""
+        """处理list命令"""
         try:
-            client_type, client = self._get_active_client()
+            client_type, client = await self.qq_server.connection_manager.get_preferred_client()
             
             if not client:
-                return "服务器连接未就绪(MSMP和RCON均未连接)"
+                return "服务器连接未就绪\n请使用 #reconnect 手动重连"
             
-            # 获取玩家列表
             try:
                 if client_type == 'msmp':
                     player_info = client.get_player_list_sync()
-                else:  # rcon
+                else:
                     player_info = client.get_player_list()
             except Exception as e:
-                self.logger.error(f"获取玩家列表失败 ({client_type}): {e}")
+                self.logger.error(f"获取玩家列表失败: {e}")
                 return f"获取玩家列表失败: {str(e)}"
             
             lines = [f"在线人数: {player_info.current_players}/{player_info.max_players}"]
@@ -283,72 +290,63 @@ class CommandHandlers:
             else:
                 lines.append("\n暂无玩家在线")
             
-            # 添加连接方式标识
             lines.append(f"\n[通过 {client_type.upper()} 查询]")
-            
             return "\n".join(lines)
             
         except Exception as e:
             self.logger.error(f"执行list命令失败: {e}", exc_info=True)
             return f"获取玩家列表失败: {e}"
-    
+
     async def handle_tps(self, **kwargs) -> str:
-        """处理tps命令 - 仅通过RCON执行"""
+        """处理tps命令"""
         try:
-            # TPS命令只能通过RCON执行
             if not self.config_manager.is_rcon_enabled():
-                return "TPS命令需要启用RCON连接"
+                return "TPS查询需要启用RCON连接"
+
+            client_type, client = await self.qq_server.connection_manager.get_client_for_command("tps")
             
-            if not self.rcon_client or not self.rcon_client.is_connected():
-                return "RCON连接未就绪"
+            if not client or client_type != 'rcon':
+                return "TPS命令需要RCON连接\n请使用 #reconnect_rcon 重连"
             
-            # 从配置获取TPS命令
             tps_command = self.config_manager.get_tps_command()
-            
-            self.logger.info(f"执行TPS命令: {tps_command}")
-            
-            # 执行命令
-            result = self.rcon_client.execute_command(tps_command)
+            result = client.execute_command(tps_command)
             
             if result:
-                # 清理RCON返回的颜色代码
-                cleaned = re.sub(r'§[0-9a-fk-or]', '', result).strip()
+                cleaned = re.sub(r'Â§[0-9a-fk-or]', '', result).strip()
                 return f"服务器TPS信息:\n{cleaned}\n\n[通过 RCON 查询]"
             else:
                 return "TPS命令执行成功,但无返回结果"
-                
+                    
         except Exception as e:
             self.logger.error(f"执行TPS命令失败: {e}", exc_info=True)
             return f"获取TPS信息失败: {e}"
-    
+        
     async def handle_rules(self, **kwargs) -> str:
-        """处理rules命令 - 仅通过MSMP查询游戏规则"""
+        """处理rules命令"""
         try:
-            # 游戏规则只能通过MSMP查询
             if not self.config_manager.is_msmp_enabled():
                 return "规则查询需要启用MSMP连接"
             
-            if not self.msmp_client or not self.msmp_client.is_connected():
-                return "MSMP连接未就绪"
+            client_type, client = await self.qq_server.connection_manager.ensure_connected()
+            
+            if not client or client_type != 'msmp':
+                return "MSMP连接未就绪\n请使用 #reconnect_msmp 手动重连"
             
             self.logger.info("查询服务器规则...")
             
-            lines = ["服务器规则信息", "━━━━━━━━━━━━━━"]
+            lines = ["服务器规则信息", "=" * 20]
             
             try:
-                # 1. 获取所有游戏规则 - 使用正确的方法名
                 gamerules_result = await self.msmp_client.get_game_rules()
                 
                 if 'result' in gamerules_result and isinstance(gamerules_result['result'], list):
                     gamerules_list = gamerules_result['result']
                     
-                    # 将规则列表转换为字典，方便查询
                     gamerules_dict = {}
                     for rule in gamerules_list:
                         if isinstance(rule, dict) and 'key' in rule and 'value' in rule:
                             gamerules_dict[rule['key']] = rule['value']
                     
-                    # 常用游戏规则列表
                     important_rules = {
                         'keepInventory': '死亡不掉落',
                         'doDaylightCycle': '时间循环',
@@ -359,7 +357,7 @@ class CommandHandlers:
                         'commandBlockOutput': '命令方块输出',
                         'naturalRegeneration': '自然生命恢复',
                         'doWeatherCycle': '天气循环',
-                        'announceAdvancements': '成就通告',
+                        'announceAdvancements': '成就通知',
                         'showDeathMessages': '显示死亡信息'
                     }
                     
@@ -371,7 +369,6 @@ class CommandHandlers:
                                 rules_found = True
                             
                             value = gamerules_dict[rule_key]
-                            # 格式化布尔值
                             if isinstance(value, bool):
                                 value_str = "启用" if value else "禁用"
                             elif isinstance(value, str) and value.lower() in ['true', 'false']:
@@ -379,128 +376,95 @@ class CommandHandlers:
                             else:
                                 value_str = str(value)
                             lines.append(f"• {rule_name}: {value_str}")
-                
-                # 2. 获取服务器设置
-                server_settings = {
-                    'difficulty': '难度',
-                    'view_distance': '视距',
-                    'simulation_distance': '模拟距离',
-                    'max_players': '最大玩家数',
-                    'game_mode': '默认游戏模式',
-                    'spawn_protection_radius': '出生点保护半径',
-                    'player_idle_timeout': '闲置超时时间'
-                }
-                
-                settings_found = False
-                for setting_key, setting_name in server_settings.items():
-                    try:
-                        # 使用正确的MSMP方法查询服务器设置
-                        result = await self.msmp_client.send_request(f"serversettings/{setting_key}")
-                        
-                        if 'result' in result:
-                            if not settings_found:
-                                lines.append("\n服务器设置:")
-                                settings_found = True
-                            
-                            value = result['result']
-                            
-                            if value is not None:
-                                # 特殊处理不同类型的值
-                                if setting_key == 'difficulty':
-                                    if isinstance(value, str):
-                                        difficulty_map = {
-                                            'peaceful': '和平',
-                                            'easy': '简单',
-                                            'normal': '普通',
-                                            'hard': '困难'
-                                        }
-                                        value_str = difficulty_map.get(value.lower(), value)
-                                    else:
-                                        difficulty_map = {0: '和平', 1: '简单', 2: '普通', 3: '困难'}
-                                        value_str = difficulty_map.get(value, str(value))
-                                elif setting_key == 'game_mode':
-                                    gamemode_map = {
-                                        'survival': '生存',
-                                        'creative': '创造',
-                                        'adventure': '冒险',
-                                        'spectator': '旁观'
-                                    }
-                                    value_str = gamemode_map.get(str(value).lower(), str(value))
-                                elif setting_key in ['view_distance', 'simulation_distance']:
-                                    value_str = f"{value} 区块"
-                                elif setting_key == 'spawn_protection_radius':
-                                    value_str = f"{value} 方块"
-                                elif setting_key == 'player_idle_timeout':
-                                    if value == 0:
-                                        value_str = "禁用"
-                                    else:
-                                        value_str = f"{value} 秒"
-                                else:
-                                    value_str = str(value)
-                                
-                                lines.append(f"• {setting_name}: {value_str}")
-                    except Exception as e:
-                        self.logger.debug(f"查询设置 {setting_key} 失败: {e}")
-                        continue
-                
-                # 3. 查询白名单状态
-                try:
-                    # 先检查白名单是否启用
-                    use_allowlist_result = await self.msmp_client.send_request("serversettings/use_allowlist")
                     
-                    if 'result' in use_allowlist_result:
-                        if not settings_found:
-                            lines.append("\n服务器设置:")
-                            settings_found = True
-                        
-                        use_allowlist = use_allowlist_result['result']
-                        
-                        if use_allowlist:
-                            # 如果启用了白名单，获取白名单玩家列表
-                            try:
-                                allowlist_result = await self.msmp_client.send_request("allowlist")
-                                if 'result' in allowlist_result:
-                                    players = allowlist_result['result']
-                                    if isinstance(players, list):
-                                        lines.append(f"• 白名单: 启用 ({len(players)} 个玩家)")
+                    server_settings = {
+                        'difficulty': '难度',
+                        'view_distance': '视距',
+                        'simulation_distance': '模拟距离',
+                        'max_players': '最大玩家数',
+                        'game_mode': '默认游戏模式',
+                        'spawn_protection_radius': '出生点保护半径',
+                        'player_idle_timeout': '闲置超时时间'
+                    }
+                    
+                    settings_found = False
+                    for setting_key, setting_name in server_settings.items():
+                        try:
+                            result = await self.msmp_client.send_request(f"serversettings/{setting_key}")
+                            
+                            if 'result' in result:
+                                if not settings_found:
+                                    lines.append("\n服务器设置:")
+                                    settings_found = True
+                                
+                                value = result['result']
+                                
+                                if value is not None:
+                                    if setting_key == 'difficulty':
+                                        if isinstance(value, str):
+                                            difficulty_map = {
+                                                'peaceful': '和平',
+                                                'easy': '简单',
+                                                'normal': '普通',
+                                                'hard': '困难'
+                                            }
+                                            value_str = difficulty_map.get(value.lower(), value)
+                                        else:
+                                            difficulty_map = {0: '和平', 1: '简单', 2: '普通', 3: '困难'}
+                                            value_str = difficulty_map.get(value, str(value))
+                                    elif setting_key == 'game_mode':
+                                        gamemode_map = {
+                                            'survival': '生存',
+                                            'creative': '创造',
+                                            'adventure': '冒险',
+                                            'spectator': '旁观'
+                                        }
+                                        value_str = gamemode_map.get(str(value).lower(), str(value))
+                                    elif setting_key in ['view_distance', 'simulation_distance']:
+                                        value_str = f"{value} 区块"
+                                    elif setting_key == 'spawn_protection_radius':
+                                        value_str = f"{value} 方块"
+                                    elif setting_key == 'player_idle_timeout':
+                                        if value == 0:
+                                            value_str = "禁用"
+                                        else:
+                                            value_str = f"{value} 分'"
                                     else:
-                                        lines.append("• 白名单: 启用")
-                            except:
-                                lines.append("• 白名单: 启用")
-                        else:
-                            lines.append("• 白名单: 关闭")
-                except Exception as e:
-                    self.logger.debug(f"查询白名单状态失败: {e}")
-                
-                # 如果没有获取到任何信息
-                if len(lines) == 2:
-                    lines.append("\n未能获取到规则信息")
-                    lines.append("提示: MSMP连接正常但无法获取规则数据")
-                    lines.append("可能原因:")
-                    lines.append("1. MSMP插件版本过旧")
-                    lines.append("2. 服务器权限配置问题")
-                    lines.append("3. 查看服务器日志了解详情")
-                
-                lines.append("\n━━━━━━━━━━━━━━")
-                lines.append("[通过 MSMP 查询]")
-                
-                return "\n".join(lines)
-                
+                                        value_str = str(value)
+                                    
+                                    lines.append(f"• {setting_name}: {value_str}")
+                        except Exception as e:
+                            self.logger.debug(f"查询设置 {setting_key} 失败: {e}")
+                            continue
+                    
+                    if len(lines) == 2:
+                        lines.append("\n未能获取到规则信息")
+                        lines.append("提示: MSMP连接正常但无法获取规则数据")
+                        lines.append("可能原因:")
+                        lines.append("1. MSMP插件版本过旧")
+                        lines.append("2. 服务器权限配置问题")
+                        lines.append("3. 查看服务器日志了解详情")
+                    
+                    lines.append("\n" + "=" * 20)
+                    lines.append("[通过 MSMP 查询]")
+                    
+                    return "\n".join(lines)
+                    
             except Exception as e:
                 self.logger.error(f"获取规则信息失败: {e}", exc_info=True)
                 return f"获取规则信息失败: {str(e)}\n提示: 请检查MSMP插件版本和配置"
-                
+                    
         except Exception as e:
             self.logger.error(f"执行rules命令失败: {e}", exc_info=True)
             return f"查询服务器规则失败: {e}"
     
     async def handle_status(self, **kwargs) -> str:
-        """处理status命令 - 显示所有连接状态"""
+        """处理status命令"""
         try:
             qq_status = "已连接" if self.qq_server.is_connected() else "未连接"
             
-            # MSMP状态
             msmp_status = "未启用"
+            msmp_connected = False
             if self.config_manager.is_msmp_enabled():
                 if not self.msmp_client:
                     msmp_status = "客户端未初始化"
@@ -509,22 +473,19 @@ class CommandHandlers:
                 else:
                     try:
                         status = self.msmp_client.get_server_status_sync()
-                        started = status.get('started', False)
                         version = status.get('version', {})
                         version_name = version.get('name', 'Unknown')
-                        
-                        player_info = self.msmp_client.get_player_list_sync()
-                        
+                                            
                         msmp_status = (
                             f"运行中\n"
-                            f"版本: {version_name}\n"
-                            f"在线: {player_info.current_players}/{player_info.max_players}"
+                            f"版本: {version_name}"
                         )
+                        msmp_connected = True
                     except Exception as e:
                         msmp_status = f"连接异常: {e}"
             
-            # RCON状态
             rcon_status = "未启用"
+            rcon_connected = False
             if self.config_manager.is_rcon_enabled():
                 if not self.rcon_client:
                     rcon_status = "客户端未初始化"
@@ -532,27 +493,93 @@ class CommandHandlers:
                     rcon_status = "未连接"
                 else:
                     try:
-                        player_info = self.rcon_client.get_player_list()
-                        rcon_status = f"运行中\n在线: {player_info.current_players}/{player_info.max_players}"
+                        rcon_status = f"运行中"
+                        rcon_connected = True
                     except Exception as e:
                         rcon_status = f"连接异常: {e}"
             
-            return (
-                "系统状态\n"
-                "━━━━━━━━━━━━━━\n"
-                f"QQ机器人: {qq_status}\n"
-                f"MSMP连接: {msmp_status}\n"
-                f"RCON连接: {rcon_status}\n"
-                "━━━━━━━━━━━━━━"
-            )
+            # 检测外部接入状态
+            external_access = msmp_connected or rcon_connected
+            
+            # 添加 Minecraft 服务器状态
+            mc_server_status = "未启动"
+            server_process_running = False
+            
+            if self.qq_server and self.qq_server.server_process:
+                if self.qq_server.server_process.poll() is None:
+                    # 服务器进程正在运行
+                    server_process_running = True
+                    try:
+                        # 尝试获取更详细的状态
+                        client_type, client = await self.qq_server.connection_manager.ensure_connected()
+                        if client:
+                            if client_type == 'msmp':
+                                player_info = self.msmp_client.get_player_list_sync()
+                                mc_server_status = (
+                                    f"运行中 (PID: {self.qq_server.server_process.pid})\n"
+                                    f"在线: {player_info.current_players}/{player_info.max_players}"
+                                )
+                            elif client_type == 'rcon':
+                                player_info = self.rcon_client.get_player_list()
+                                mc_server_status = (
+                                    f"运行中 (PID: {self.qq_server.server_process.pid})\n"
+                                    f"在线: {player_info.current_players}/{player_info.max_players}"
+                                )
+                            else:
+                                mc_server_status = f"运行中 (PID: {self.qq_server.server_process.pid})"
+                        else:
+                            mc_server_status = f"运行中 (PID: {self.qq_server.server_process.pid}) - 连接异常"
+                    except Exception as e:
+                        mc_server_status = f"运行中 (PID: {self.qq_server.server_process.pid}) - 状态获取失败"
+                else:
+                    return_code = self.qq_server.server_process.poll()
+                    mc_server_status = f"已停止 (退出码: {return_code})"
+            else:
+                # 服务器进程未运行，但可能有外部接入
+                if external_access:
+                    mc_server_status = "运行中 (外部接入)"
+                else:
+                    mc_server_status = "未启动"
+            
+            # 构建状态信息
+            status_lines = [
+                "系统状态总览",
+                "■■■■■■■■■■■■■■■",
+                f"QQ机器人: {qq_status}",
+                f"MC服务器: {mc_server_status}",
+                f"MSMP连接: {msmp_status}",
+                f"RCON连接: {rcon_status}"
+            ]
+            
+            # 添加外部接入提示（当有外部接入但服务器进程未运行时）
+            if external_access and not server_process_running:
+                status_lines.append("■■■■■■■■■■■■■■■")
+                status_lines.append("检测到外部接入: 服务器通过MSMP/RCON远程管理")
+            
+            return "\n".join(status_lines)
             
         except Exception as e:
             self.logger.error(f"执行status命令失败: {e}", exc_info=True)
             return f"获取状态失败: {e}"
+
+    def _format_uptime(self, seconds: float) -> str:
+        """格式化运行时间"""
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = int(seconds % 60)
+        
+        if days > 0:
+            return f"{days}天{hours}时{minutes}分"
+        elif hours > 0:
+            return f"{hours}时{minutes}分{seconds}秒"
+        elif minutes > 0:
+            return f"{minutes}分{seconds}秒"
+        else:
+            return f"{seconds}秒"
     
     async def handle_help(self, user_id: int, **kwargs) -> str:
         """处理help命令"""
-        from command_handler import CommandHandler
         if hasattr(self.qq_server, 'command_handler'):
             return self.qq_server.command_handler.get_help_message(user_id)
         return "帮助系统未初始化"
@@ -560,76 +587,75 @@ class CommandHandlers:
     async def handle_stop(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理stop命令(管理员) - 支持MSMP和RCON"""
         
-        # 获取锁，确保 stop 命令只执行一次
         async with self._stop_lock:
-            # 检查是否已经在停止中
             if self._is_stopping:
                 return "服务器已在停止中，请勿重复执行"
             
             self._is_stopping = True
         
         try:
-            client_type, client = self._get_active_client()
-            
-            if not client:
+            # 先检查服务器是否在运行
+            if not self.qq_server or not self.qq_server.server_process:
                 self._is_stopping = False
-                return "服务器连接未就绪，无法执行停止命令"
+                return "服务器未运行"
             
-            # 发送执行中止消息
+            if self.qq_server.server_process.poll() is not None:
+                self._is_stopping = False
+                return "服务器已经停止"
+            
             if is_private:
                 await self.qq_server.send_private_message(websocket, user_id, "正在停止服务器...")
             else:
                 await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
             
+            # 第一步：立即设置服务器停止标志，停止日志采集
+            self.qq_server.server_stopping = True
+            
+            # 第二步：先尝试通过连接发送停止命令（在关闭连接之前）
             stop_success = False
-            stop_method = ""
             
             try:
-                if client_type == 'msmp':
-                    stop_method = "MSMP"
-                    # MSMP: 执行停止命令
-                    result = client.execute_command_sync("server/stop")
+                # 使用连接管理器获取客户端
+                client_type, client = await self.qq_server.connection_manager.ensure_connected()
+                
+                if client:
+                    if client_type == 'msmp':
+                        result = client.execute_command_sync("server/stop")
+                        if 'result' in result:
+                            stop_success = True
+                            self.logger.info("MSMP 停止命令已发送")
                     
-                    if 'result' not in result:
-                        error_msg = result.get('error', {}).get('message', '未知错误')
-                        self.logger.error(f"MSMP停止命令失败: {error_msg}")
-                    else:
-                        stop_success = True
-                        self.logger.info("MSMP 停止命令已发送")
-                    
-                elif client_type == 'rcon':
-                    stop_method = "RCON"
-                    # RCON: 执行停止命令
-                    result = client.execute_command("stop")
-                    
-                    if result is None:
-                        # RCON执行stop命令后连接会断开，返回None是正常的
-                        stop_success = True
-                        self.logger.info("RCON停止命令已发送(连接正常断开)")
-                    else:
+                    elif client_type == 'rcon':
+                        result = client.execute_command("stop")
                         stop_success = True
                         self.logger.info("RCON停止命令已发送")
-                    
-                    # RCON停止命令发送后立即关闭连接，避免后续错误
-                    if self.rcon_client and self.rcon_client.is_connected():
-                        try:
-                            self.rcon_client.close()
-                            self.logger.info("已关闭RCON连接")
-                        except Exception as e:
-                            self.logger.debug(f"关闭RCON连接时出错: {e}")
+                else:
+                    self.logger.warning("无可用连接发送停止命令")
             
             except Exception as e:
-                self.logger.warning(f"执行停止命令时出现异常(可能是正常断开): {e}")
-                # 对于stop命令，某些异常可能是正常的（如连接断开）
-                stop_success = True
+                self.logger.warning(f"通过连接发送停止命令失败: {e}")
             
+            # 第三步：如果无法通过连接停止，尝试通过标准输入发送停止命令
             if not stop_success:
-                self._is_stopping = False
-                return f"停止服务器失败: 无法通过{stop_method}发送停止命令"
+                try:
+                    if (self.qq_server.server_process and 
+                        self.qq_server.server_process.poll() is None and
+                        self.qq_server.server_process.stdin):
+                        
+                        stop_command = "stop\n"
+                        self.qq_server.server_process.stdin.write(stop_command.encode('utf-8'))
+                        self.qq_server.server_process.stdin.flush()
+                        self.logger.info("已通过标准输入发送停止命令")
+                        stop_success = True
+                except Exception as e:
+                    self.logger.warning(f"通过标准输入发送停止命令失败: {e}")
+            
+            # 第四步：立即彻底关闭所有连接
+            await self._thorough_shutdown()
             
             self.logger.info("停止命令已发送，等待服务器关闭进程...")
             
-            # 等待服务器进程结束（最多60秒）
+            # 等待服务器关闭
             max_wait_time = 60
             wait_interval = 5
             waited_time = 0
@@ -641,7 +667,7 @@ class CommandHandlers:
                 waited_time += wait_interval
                 self.logger.info(f"等待服务器关闭... ({waited_time}/{max_wait_time}秒)")
             
-            # 检查服务器进程状态
+            # 检查服务器是否已关闭
             server_stopped = True
             if self.qq_server.server_process:
                 return_code = self.qq_server.server_process.poll()
@@ -651,66 +677,168 @@ class CommandHandlers:
                 else:
                     self.logger.info(f"服务器进程已关闭，返回码: {return_code}")
             
-            # 无论服务器是否完全关闭，都执行清理操作
-            self.logger.info("执行清理操作...")
-            await self._close_all_connections()
+            # 给日志采集任务一点时间读取剩余输出
+            await asyncio.sleep(2)
             
-            if server_stopped:
-                return "服务器已成功关闭"
-            else:
-                return "停止命令已发送，但服务器进程仍在运行中。可能需要手动检查或使用 #kill 命令强制停止"
+            result_message = "服务器已成功关闭" if server_stopped else "停止命令已发送，但服务器进程仍在运行中。可能需要手动检查或使用 #kill 命令强制停止"
+            print(result_message)
+            
+            return result_message
             
         except Exception as e:
             self.logger.error(f"执行stop命令失败: {e}", exc_info=True)
-            try:
-                await self._close_all_connections()
-            except:
-                pass
-            return f"停止服务器失败: {e}"
+            # 出错时也要执行关闭
+            await self._thorough_shutdown()
+            error_msg = f"停止服务器失败: {e}"
+            if kwargs.get('from_console', False):
+                print(error_msg)
+            return error_msg
         
         finally:
-            # 重置停止标志
             self._is_stopping = False
 
-    async def _close_all_connections(self):
-        """关闭所有连接"""
-        # 设置停止标志，防止继续处理日志
-        if self.qq_server:
-            self.qq_server.server_stopping = True
+    async def _thorough_shutdown(self):
+        """彻底关闭所有连接"""
+        self.logger.info("执行彻底关闭操作...")
         
-        # 首先关闭 RCON 连接（最重要）
-        if self.rcon_client:
-            try:
-                self.rcon_client.close()
-                self.logger.info("已关闭 RCON 连接")
-            except Exception as e:
-                self.logger.debug(f"关闭 RCON 连接出错: {e}")
+        # 第一步：通过连接管理器设置关闭模式
+        if hasattr(self.qq_server, 'connection_manager'):
+            await self.qq_server.connection_manager.set_shutdown_mode()
         
-        # 然后关闭 MSMP 连接
+        # 第二步：强制关闭MSMP连接
         if self.msmp_client:
             try:
-                await asyncio.wait_for(self.msmp_client.close(), timeout=5.0)
-                self.logger.info("已关闭 MSMP 连接")
-            except asyncio.TimeoutError:
-                self.logger.warning("MSMP 连接关闭超时")
+                if hasattr(self.msmp_client, 'close_sync'):
+                    self.msmp_client.close_sync()
+                elif hasattr(self.msmp_client, 'close'):
+                    await asyncio.wait_for(self.msmp_client.close(), timeout=3.0)
+                self.logger.info("MSMP连接已强制关闭")
             except Exception as e:
-                self.logger.debug(f"关闭 MSMP 连接出错: {e}")
+                self.logger.debug(f"强制关闭MSMP连接时出错: {e}")
         
-        # 关闭服务器日志文件
+        # 第三步：强制关闭RCON连接
+        if self.rcon_client:
+            try:
+                if hasattr(self.rcon_client, 'close'):
+                    self.rcon_client.close()
+                self.logger.info("RCON连接已强制关闭")
+            except Exception as e:
+                self.logger.debug(f"强制关闭RCON连接时出错: {e}")
+        
+        # 第四步：关闭日志文件
         if self.qq_server:
+            try:
+                self.qq_server._close_log_file()
+                self.logger.info("服务器日志文件已关闭")
+            except Exception as e:
+                self.logger.debug(f"关闭日志文件出错: {e}")
+        
+        self._shutdown_initiated = True
+        self.logger.info("彻底关闭操作完成")
+
+    async def _immediate_shutdown(self):
+        """立即关闭所有连接（用于kill命令）"""
+        await self._unified_shutdown(immediate=True)
+
+    async def _close_all_connections(self):
+        """关闭所有连接（用于正常停止）"""
+        await self._unified_shutdown(immediate=False)
+
+    async def _unified_shutdown(self, immediate: bool = False):
+        """统一的关闭方法"""
+        if hasattr(self, '_shutdown_initiated') and self._shutdown_initiated:
+            self.logger.debug("关闭模式已设置，跳过重复操作")
+            return
+        
+        self.logger.info("执行统一关闭操作...")
+        
+        # 设置关闭标志
+        self._is_stopping = True
+        
+        # 第一步：通过连接管理器设置关闭模式，这会停止所有重连
+        if hasattr(self.qq_server, 'connection_manager'):
+            await self.qq_server.connection_manager.set_shutdown_mode()
+        
+        # 第二步：如果是立即关闭，强制关闭连接
+        if immediate:
+            if self.msmp_client and hasattr(self.msmp_client, 'close'):
+                try:
+                    await asyncio.wait_for(self.msmp_client.close(), timeout=3.0)
+                except Exception as e:
+                    self.logger.debug(f"立即关闭MSMP连接时出错: {e}")
+            
+            if self.rcon_client and hasattr(self.rcon_client, 'close'):
+                try:
+                    self.rcon_client.close()
+                except Exception as e:
+                    self.logger.debug(f"立即关闭RCON连接时出错: {e}")
+        
+        # 第三步：关闭日志文件
+        if self.qq_server and immediate:
             try:
                 self.qq_server._close_log_file()
             except Exception as e:
                 self.logger.debug(f"关闭日志文件出错: {e}")
+        
+        self._shutdown_initiated = True
+        self.logger.info("统一关闭操作完成")
+    
+    async def _reset_shutdown_mode(self):
+        """重置关闭模式"""
+        self.logger.info("开始重置关闭模式...")
+        
+        # 重置命令处理器的关闭标志
+        self._is_stopping = False
+        if hasattr(self, '_shutdown_event'):
+            self._shutdown_event.clear()
+        
+        # 重置连接管理器的关闭模式
+        if hasattr(self.qq_server, 'connection_manager'):
+            await self.qq_server.connection_manager.reset_shutdown_mode()
+        
+        # 重置MSMP客户端的关闭模式
+        if self.msmp_client and hasattr(self.msmp_client, 'set_shutdown_mode'):
+            # 如果MSMP客户端有重置方法，调用它
+            if hasattr(self.msmp_client, 'reset_shutdown_mode'):
+                self.msmp_client.reset_shutdown_mode()
+            else:
+                # 否则手动重置相关标志
+                if hasattr(self.msmp_client, '_shutdown_mode'):
+                    self.msmp_client._shutdown_mode = False
+        
+        # 重置RCON客户端状态
+        if self.rcon_client:
+            # 确保RCON客户端处于可重连状态
+            if hasattr(self.rcon_client, 'authenticated'):
+                self.rcon_client.authenticated = False
+            if hasattr(self.rcon_client, 'socket') and self.rcon_client.socket:
+                try:
+                    self.rcon_client.socket.close()
+                except:
+                    pass
+                self.rcon_client.socket = None
+        
+        # 清空连接缓存
+        if hasattr(self.qq_server, 'connection_manager'):
+            await self.qq_server.connection_manager.invalidate_all_caches()
+        
+        # 重置关闭标志
+        if hasattr(self, '_connections_closed'):
+            self._connections_closed = False
+        if hasattr(self, '_shutdown_initiated'):
+            self._shutdown_initiated = False
+        
+        self.logger.info("关闭模式已完全重置")
     
     async def handle_start(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理start命令(管理员) - 支持MSMP和RCON"""
         try:
-            # 检查是否已有服务器进程在运行
+            # 第一步：重置关闭模式，允许重新连接
+            await self._reset_shutdown_mode()
+            
             if self.qq_server.server_process and self.qq_server.server_process.poll() is None:
                 return "服务器已经在启动或运行中"
             
-            # 获取启动脚本路径
             start_script = self.config_manager.get_server_start_script()
             if not start_script:
                 return (
@@ -721,17 +849,14 @@ class CommandHandlers:
             if not os.path.exists(start_script):
                 return f"启动脚本不存在: {start_script}"
             
-            # 发送执行中提示
             if websocket and not websocket.closed:
                 if is_private:
                     await self.qq_server.send_private_message(websocket, user_id, "正在启动服务器...")
                 else:
                     await self.qq_server.send_group_message(websocket, group_id, "正在启动服务器...")
             
-            # 调用qq_server的启动方法
             await self.qq_server._start_server_process(websocket, group_id)
             
-            # 添加启动后的连接提示
             connection_info = []
             if self.config_manager.is_msmp_enabled():
                 connection_info.append("MSMP管理协议")
@@ -745,11 +870,45 @@ class CommandHandlers:
                 else:
                     await self.qq_server.send_group_message(websocket, group_id, info_msg)
             
-            return None  # 不返回消息
+            return None
             
         except Exception as e:
             self.logger.error(f"执行start命令失败: {e}")
             return f"启动服务器失败: {e}"
+
+    async def _reset_shutdown_mode(self):
+        """重置关闭模式"""
+        # 检查是否已经在正常模式
+        if not self._is_stopping and not (hasattr(self, '_shutdown_event') and self._shutdown_event.is_set()):
+            self.logger.debug("已在正常模式")
+            return
+        
+        self.logger.info("重置关闭模式")
+        
+        # 重置命令处理器的关闭标志
+        self._is_stopping = False
+        if hasattr(self, '_shutdown_event'):
+            self._shutdown_event.clear()
+        
+        # 重置连接管理器的关闭模式
+        if hasattr(self.qq_server, 'connection_manager'):
+            await self.qq_server.connection_manager.reset_shutdown_mode()
+        
+        # 重置MSMP客户端的关闭模式
+        if self.msmp_client and hasattr(self.msmp_client, '_shutdown_mode'):
+            self.msmp_client._shutdown_mode = False
+        
+        # 清空连接缓存
+        if hasattr(self.qq_server, 'connection_manager'):
+            await self.qq_server.connection_manager.invalidate_all_caches()
+        
+        # 重置关闭标志
+        if hasattr(self, '_connections_closed'):
+            self._connections_closed = False
+        if hasattr(self, '_shutdown_initiated'):
+            self._shutdown_initiated = False
+        
+        self.logger.debug("关闭模式已重置")
     
     async def handle_reload(self, user_id: int, **kwargs) -> str:
         """处理reload命令(管理员)"""
@@ -763,37 +922,22 @@ class CommandHandlers:
     async def handle_log(self, user_id: int, **kwargs) -> str:
         """处理log命令 - 显示最近的服务器日志"""
         try:
-            # 检查是否有服务器进程在运行
             server_running = self.qq_server.server_process and self.qq_server.server_process.poll() is None
-            
-            # 获取最近的日志（优先从内存获取）
             recent_logs = self.qq_server.get_recent_logs(20)
             
             if not recent_logs:
-                # 如果内存中没有日志，尝试从文件读取
-                file_logs = self._read_recent_logs_from_file(10)
-                if file_logs:
-                    lines = [f"最近 {len(file_logs)} 条服务器日志 (从文件读取):"]
-                    lines.append("━━━━━━━━━━━━━━")
-                    lines.extend(file_logs)
-                    lines.append("━━━━━━━━━━━━━━")
-                    lines.append("提示: 服务器当前未运行，显示的是历史日志")
-                    return "\n".join(lines)
-                else:
-                    return "暂无服务器日志输出"
+                return "暂无服务器日志输出"
             
-            # 构建响应消息
             status = "运行中" if server_running else "已停止"
             lines = [f"最近 {len(recent_logs)} 条服务器日志 (服务器{status}):"]
-            lines.append("━━━━━━━━━━━━━━")
+            lines.append("■■■■■■■■■■■■■■")
             
             for log in recent_logs:
-                # 限制单条日志长度，避免消息过长
                 if len(log) > 100:
                     log = log[:100] + "..."
                 lines.append(log)
             
-            lines.append("━━━━━━━━━━━━━━")
+            lines.append("■■■■■■■■■■■■■■")
             if server_running:
                 lines.append("提示: 日志实时更新，再次发送 log 查看最新日志")
             else:
@@ -806,68 +950,32 @@ class CommandHandlers:
             return f"获取日志失败: {e}"
 
     async def handle_reconnect(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
-        """处理reconnect命令 - 手动重连服务"""
+        """处理reconnect命令 - 手动重连服务器"""
         try:
-            # 发送执行中提示
             if is_private:
-                await self.qq_server.send_private_message(websocket, user_id, "正在尝试重新连接服务...")
+                await self.qq_server.send_private_message(websocket, user_id, "正在尝试重新连接服务器...")
             else:
-                await self.qq_server.send_group_message(websocket, group_id, "正在尝试重新连接服务...")
+                await self.qq_server.send_group_message(websocket, group_id, "正在尝试重新连接服务器...")
             
-            results = []
+            results = await self.qq_server.connection_manager.reconnect_all()
             
-            # 尝试重连MSMP
-            if self.config_manager.is_msmp_enabled() and self.msmp_client:
-                try:
-                    if self.msmp_client.is_connected():
-                        results.append("MSMP: 已连接 (无需重连)")
-                    else:
-                        self.logger.info("手动重连MSMP服务器...")
-                        self.msmp_client.connect_sync()
-                        await asyncio.sleep(3)  # 等待连接稳定
+            message_lines = ["重连结果:", "■■■■■■■■■■■■■■"]
+            
+            if results.get('msmp'):
+                message_lines.append("MSMP: 连接成功")
+            else:
+                message_lines.append("MSMP: 连接失败")
+            
+            if results.get('rcon'):
+                message_lines.append("RCON: 连接成功")
+            else:
+                message_lines.append("RCON: 连接失败")
                         
-                        if self.msmp_client.is_connected():
-                            results.append("MSMP: 连接成功 ✓")
-                            self.logger.info("MSMP手动重连成功")
-                        else:
-                            results.append("MSMP: 连接失败 ✗")
-                            self.logger.warning("MSMP手动重连失败")
-                except Exception as e:
-                    results.append(f"MSMP: 连接异常 - {str(e)}")
-                    self.logger.error(f"MSMP手动重连异常: {e}")
-            
-            # 尝试重连RCON
-            if self.config_manager.is_rcon_enabled() and self.rcon_client:
-                try:
-                    if self.rcon_client.is_connected():
-                        results.append("RCON: 已连接 (无需重连)")
-                    else:
-                        self.logger.info("手动重连RCON服务器...")
-                        success = self.rcon_client.connect()
-                        
-                        if success:
-                            results.append("RCON: 连接成功 ✓")
-                            self.logger.info("RCON手动重连成功")
-                        else:
-                            results.append("RCON: 连接失败 ✗")
-                            self.logger.warning("RCON手动重连失败")
-                except Exception as e:
-                    results.append(f"RCON: 连接异常 - {str(e)}")
-                    self.logger.error(f"RCON手动重连异常: {e}")
-            
-            if not results:
-                return "没有启用任何服务连接，无需重连"
-            
-            # 构建结果消息
-            message_lines = ["重连结果:", "━━━━━━━━━━━━━━"]
-            message_lines.extend(results)
-            message_lines.append("━━━━━━━━━━━━━━")
-            
             return "\n".join(message_lines)
             
         except Exception as e:
             self.logger.error(f"执行reconnect命令失败: {e}", exc_info=True)
-            return f"重连服务失败: {e}"
+            return f"重连服务器失败: {e}"
 
     async def handle_reconnect_msmp(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理reconnect_msmp命令 - 手动重连MSMP"""
@@ -875,42 +983,17 @@ class CommandHandlers:
             if not self.config_manager.is_msmp_enabled():
                 return "MSMP未启用，无法重连"
             
-            if not self.msmp_client:
-                return "MSMP客户端未初始化"
-            
-            # 发送执行中提示
             if is_private:
                 await self.qq_server.send_private_message(websocket, user_id, "正在重连MSMP服务器...")
             else:
                 await self.qq_server.send_group_message(websocket, group_id, "正在重连MSMP服务器...")
             
-            # 检查当前状态
-            current_status = "已连接" if self.msmp_client.is_connected() else "未连接"
+            success = await self.qq_server.connection_manager.reconnect_msmp()
             
-            try:
-                # 先关闭现有连接
-                if self.msmp_client.is_connected():
-                    self.msmp_client.close_sync()
-                    await asyncio.sleep(1)  # 等待关闭完成
-                
-                # 重新连接
-                self.logger.info("手动重连MSMP服务器...")
-                self.msmp_client.connect_sync()
-                await asyncio.sleep(3)  # 等待连接稳定
-                
-                if self.msmp_client.is_connected():
-                    result = f"MSMP重连成功 ✓\n原状态: {current_status}\n现状态: 已连接"
-                    self.logger.info("MSMP手动重连成功")
-                else:
-                    result = f"MSMP重连失败 ✗\n原状态: {current_status}\n现状态: 未连接"
-                    self.logger.warning("MSMP手动重连失败")
-                
-                return result
-                
-            except Exception as e:
-                error_msg = f"MSMP重连异常: {str(e)}"
-                self.logger.error(f"MSMP手动重连异常: {e}")
-                return error_msg
+            if success:
+                return "MSMP重连成功"
+            else:
+                return "MSMP重连失败"
             
         except Exception as e:
             self.logger.error(f"执行reconnect_msmp命令失败: {e}", exc_info=True)
@@ -922,63 +1005,200 @@ class CommandHandlers:
             if not self.config_manager.is_rcon_enabled():
                 return "RCON未启用，无法重连"
             
-            if not self.rcon_client:
-                return "RCON客户端未初始化"
-            
-            # 发送执行中提示
             if is_private:
                 await self.qq_server.send_private_message(websocket, user_id, "正在重连RCON服务器...")
             else:
                 await self.qq_server.send_group_message(websocket, group_id, "正在重连RCON服务器...")
             
-            # 检查当前状态
-            current_status = "已连接" if self.rcon_client.is_connected() else "未连接"
+            success = await self.qq_server.connection_manager.reconnect_rcon()
             
-            try:
-                # 先关闭现有连接
-                if self.rcon_client.is_connected():
-                    self.rcon_client.close()
-                    await asyncio.sleep(1)  # 等待关闭完成
-                
-                # 重新连接
-                self.logger.info("手动重连RCON服务器...")
-                success = self.rcon_client.connect()
-                
-                if success:
-                    result = f"RCON重连成功 ✓\n原状态: {current_status}\n现状态: 已连接"
-                    self.logger.info("RCON手动重连成功")
-                else:
-                    result = f"RCON重连失败 ✗\n原状态: {current_status}\n现状态: 未连接"
-                    self.logger.warning("RCON手动重连失败")
-                
-                return result
-                
-            except Exception as e:
-                error_msg = f"RCON重连异常: {str(e)}"
-                self.logger.error(f"RCON手动重连异常: {e}")
-                return error_msg
+            if success:
+                return "RCON重连成功"
+            else:
+                return "RCON重连失败"
             
         except Exception as e:
             self.logger.error(f"执行reconnect_rcon命令失败: {e}", exc_info=True)
             return f"重连RCON失败: {e}"
 
-    def _read_recent_logs_from_file(self, lines: int = 10) -> List[str]:
-        """从日志文件读取最近的日志"""
+    async def handle_kill(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理kill命令(管理员) - 强制杀死服务器进程"""
+        return await self._execute_kill_command(user_id, group_id, websocket, is_private)
+    
+    async def _execute_kill_command(self, user_id: int = 0, group_id: int = 0, websocket = None, is_private: bool = False) -> str:
+        """通用的kill命令执行方法"""
         try:
-            log_file_path = "logs/mc_server.log"  # 更新为新的日志路径
-            if not os.path.exists(log_file_path):
-                return []
+            if not self.qq_server or not self.qq_server.server_process:
+                return "服务器进程未运行"
             
-            # 读取文件最后几行
-            with open(log_file_path, 'r', encoding='utf-8') as f:
-                # 简单的方法：读取所有行然后取最后几行
-                all_lines = f.readlines()
-                recent_lines = all_lines[-lines:] if len(all_lines) >= lines else all_lines
-                return [line.strip() for line in recent_lines if line.strip()]
+            if self.qq_server.server_process.poll() is not None:
+                return "服务器进程已经停止"
+            
+            # 立即执行统一关闭操作
+            await self._immediate_shutdown()
+                        
+            import signal
+            import subprocess
+            
+            try:
+                pid = self.qq_server.server_process.pid
+                self.logger.info(f"强制终止进程 {pid}")
                 
+                if os.name == 'nt':
+                    try:
+                        result = subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(pid)], 
+                            timeout=10, 
+                            capture_output=True, 
+                            text=True
+                        )
+                        if result.returncode == 0:
+                            self.logger.info(f"已强制终止进程树 {pid}")
+                        else:
+                            self.logger.warning(f"taskkill 返回非零状态: {result.returncode}")
+                            os.kill(pid, signal.SIGTERM)
+                    except subprocess.TimeoutExpired:
+                        self.logger.warning("taskkill 超时，尝试其他方法")
+                        os.kill(pid, signal.SIGTERM)
+                    except Exception as e:
+                        self.logger.warning(f"taskkill 失败: {e}")
+                        os.kill(pid, signal.SIGTERM)
+                else:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    
+            except ProcessLookupError:
+                self.logger.info("进程已不存在")
+            except Exception as e:
+                self.logger.error(f"强制中止进程失败: {e}")
+                return f"强制中止失败: {e}"
+            
+            try:
+                await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.qq_server.server_process.wait
+                    ),
+                    timeout=10.0
+                )
+                self.logger.info("进程已确认终止")
+            except asyncio.TimeoutError:
+                self.logger.warning("进程在10秒内未响应，尝试强制杀死")
+                try:
+                    if os.name == 'nt':
+                        os.kill(pid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                except:
+                    pass
+            
+            # 等待日志采集完成
+            await asyncio.sleep(2)
+            
+            await self._thorough_cleanup()
+            
+            self.qq_server.server_process = None
+            self.qq_server._close_log_file()
+            
+            return "服务器进程已强制中止，所有连接和端口已彻底清理"
+            
         except Exception as e:
-            self.logger.error(f"读取日志文件失败: {e}")
-            return []
+            self.logger.error(f"执行kill命令失败: {e}", exc_info=True)
+            return f"强制中止失败: {e}"
+
+    async def _thorough_cleanup(self):
+        """彻底清理所有残留"""
+        try:
+            self.logger.info("开始彻底清理残留资源...")
+            
+            await self._force_clean_file_locks()
+            await asyncio.sleep(3)
+            
+            self.logger.info("彻底清理完成")
+            
+        except Exception as e:
+            self.logger.error(f"彻底清理失败: {e}")
+
+    async def _force_clean_file_locks(self):
+        """强制清理文件锁"""
+        try:
+            working_dir = self.config_manager.get_server_working_directory()
+            if not working_dir:
+                start_script = self.config_manager.get_server_start_script()
+                working_dir = os.path.dirname(start_script)
+                
+            import time
+            
+            files_to_clean = [
+                os.path.join(working_dir, "session.lock"),
+                os.path.join(working_dir, "world", "session.lock"),
+                os.path.join(working_dir, "world_nether", "session.lock"),
+                os.path.join(working_dir, "world_the_end", "session.lock"),
+            ]
+            
+            for file_path in files_to_clean:
+                if os.path.exists(file_path):
+                    try:
+                        for attempt in range(3):
+                            try:
+                                os.remove(file_path)
+                                self.logger.info(f"已删除: {file_path}")
+                                break
+                            except Exception:
+                                if attempt < 2:
+                                    await asyncio.sleep(1)
+                                else:
+                                    raise
+                    except Exception as e:
+                        self.logger.warning(f"无法删除 {file_path}: {e}")
+                        
+        except Exception as e:
+            self.logger.error(f"强制清理文件锁失败: {e}")
+
+    async def handle_crash(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
+        """处理crash命令(管理员) - 获取最新的崩溃报告"""
+        try:
+            import os
+            from pathlib import Path
+            
+            working_dir = self.config_manager.get_server_working_directory()
+            if not working_dir:
+                start_script = self.config_manager.get_server_start_script()
+                working_dir = os.path.dirname(start_script)
+            
+            crash_dir = os.path.join(working_dir, "crash-reports")
+            crash_path = Path(crash_dir)
+            
+            if not crash_path.exists():
+                return f"crash-reports 目录不存在: {crash_dir}"
+            
+            crash_files = list(crash_path.glob("crash-*.txt"))
+            
+            if not crash_files:
+                return "未找到任何崩溃报告"
+            
+            latest_crash = max(crash_files, key=lambda p: p.stat().st_mtime)
+            
+            self.logger.info(f"找到最新崩溃报告: {latest_crash.name}")
+            
+            await self.qq_server._send_crash_report_file(websocket, user_id, group_id, str(latest_crash), is_private)
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"处理崩溃报告失败: {e}", exc_info=True)
+            return f"处理崩溃报告失败: {e}"
+
+    async def handle_listeners(self, **kwargs) -> str:
+        """处理 listeners 命令 - 显示所有自定义消息监听规则"""
+        try:
+            if not self.qq_server.custom_listener:
+                return "自定义消息监听器未初始化"
+            
+            return self.qq_server.custom_listener.get_rules_info()
+            
+        except Exception as e:
+            self.logger.error(f"执行 listeners 命令失败: {e}", exc_info=True)
+            return f"获取监听规则失败: {e}"
 
     async def handle_sysinfo(self, **kwargs) -> str:
         """处理sysinfo命令 - 显示系统信息"""
@@ -1040,272 +1260,3 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"执行network命令失败: {e}", exc_info=True)
             return f"获取网络信息失败: {e}"
-
-    async def handle_kill(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
-        """处理kill命令(管理员) - 调用通用方法"""
-        return await self._execute_kill_command(user_id, group_id, websocket, is_private)
-    
-    async def _execute_kill_command(self, user_id: int = 0, group_id: int = 0, websocket = None, is_private: bool = False) -> str:
-        """通用的kill命令执行方法"""
-        try:
-            if not self.qq_server or not self.qq_server.server_process:
-                return "服务器进程未运行"
-            
-            # 检查进程是否还在运行
-            if self.qq_server.server_process.poll() is not None:
-                return "服务器进程已经停止"
-            
-            # 发送执行中止提示（如果有websocket连接）
-            if websocket and not websocket.closed:
-                if is_private:
-                    await self.qq_server.send_private_message(websocket, user_id, "正在强制中止服务器进程并彻底清理...")
-                else:
-                    await self.qq_server.send_group_message(websocket, group_id, "正在强制中止服务器进程并彻底清理...")
-            else:
-                # 控制台版本
-                print("正在强制杀死Minecraft服务器并彻底清理...")
-            
-            self.logger.info(f"{'控制台' if user_id == 0 else f'用户 {user_id}'} 执行强制中止服务器命令")
-            
-            # 第一步：先关闭所有连接
-            await self._close_all_connections()
-            
-            # 第二步：强制杀死进程
-            import signal
-            import os
-            import subprocess
-            
-            try:
-                pid = self.qq_server.server_process.pid
-                self.logger.info(f"强制终止进程 {pid}")
-                
-                if os.name == 'nt':  # Windows
-                    # 使用 taskkill 强制终止进程树
-                    try:
-                        result = subprocess.run(
-                            ['taskkill', '/F', '/T', '/PID', str(pid)], 
-                            timeout=10, 
-                            capture_output=True, 
-                            text=True
-                        )
-                        if result.returncode == 0:
-                            self.logger.info(f"已强制终止进程树 {pid}")
-                        else:
-                            self.logger.warning(f"taskkill 返回非零状态: {result.returncode}")
-                            # 备用方法
-                            os.kill(pid, signal.SIGTERM)
-                    except subprocess.TimeoutExpired:
-                        self.logger.warning("taskkill 超时，尝试其他方法")
-                        os.kill(pid, signal.SIGTERM)
-                    except Exception as e:
-                        self.logger.warning(f"taskkill 失败: {e}")
-                        os.kill(pid, signal.SIGTERM)
-                else:  # Linux/Mac
-                    os.killpg(os.getpgid(pid), signal.SIGKILL)
-                    
-            except ProcessLookupError:
-                self.logger.info("进程已不存在")
-            except Exception as e:
-                self.logger.error(f"强制中止进程失败: {e}")
-                return f"强制中止失败: {e}"
-            
-            # 第三步：等待进程结束
-            try:
-                await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        None,
-                        self.qq_server.server_process.wait
-                    ),
-                    timeout=10.0
-                )
-                self.logger.info("进程已确认终止")
-            except asyncio.TimeoutError:
-                self.logger.warning("进程在10秒内未响应，尝试强制杀死")
-                try:
-                    if os.name == 'nt':
-                        os.kill(pid, signal.SIGKILL)
-                    else:
-                        os.kill(pid, signal.SIGKILL)
-                except:
-                    pass
-            
-            # 第四步：彻底清理端口占用和文件锁
-            await self._thorough_cleanup()
-            
-            # 第五步：清理进程引用和文件
-            self.qq_server.server_process = None
-            self.qq_server._close_log_file()
-            
-            return "服务器进程已强制中止，所有连接和端口已彻底清理"
-            
-        except Exception as e:
-            self.logger.error(f"执行kill命令失败: {e}", exc_info=True)
-            return f"强制中止失败: {e}"
-
-    async def _thorough_cleanup(self):
-        """彻底清理所有残留"""
-        try:
-            self.logger.info("开始彻底清理残留资源...")
-            
-            # 1. 强制清理文件锁
-            await self._force_clean_file_locks()
-            
-            # 2. 等待确保所有资源释放
-            await asyncio.sleep(3)
-            
-            self.logger.info("彻底清理完成")
-            
-        except Exception as e:
-            self.logger.error(f"彻底清理失败: {e}")
-
-    async def _clean_port(self, port: int, service_name: str):
-        """清理指定端口"""
-        try:
-            if await self._is_port_in_use('localhost', port):
-                self.logger.warning(f"{service_name}端口 {port} 被占用，正在清理...")
-                
-                # 使用多种方法清理端口
-                await self._kill_process_by_port(port)
-                await asyncio.sleep(2)
-                
-                # 验证清理结果
-                if await self._is_port_in_use('localhost', port):
-                    self.logger.error(f"{service_name}端口 {port} 清理失败")
-                else:
-                    self.logger.info(f"{service_name}端口 {port} 已释放")
-                    
-        except Exception as e:
-            self.logger.error(f"清理{service_name}端口失败: {e}")
-
-    async def _kill_process_by_port(self, port: int):
-        """通过端口号杀死进程"""
-        try:
-            import subprocess
-            
-            # 方法1: 使用 netstat + taskkill
-            result = subprocess.run(
-                ['netstat', '-ano', '-p', 'TCP'], 
-                capture_output=True, text=True, timeout=10
-            )
-            
-            if result.returncode == 0:
-                for line in result.stdout.split('\n'):
-                    if f':{port}' in line and 'LISTENING' in line:
-                        parts = line.split()
-                        if len(parts) >= 5:
-                            pid = parts[-1]
-                            self.logger.info(f"发现进程 {pid} 占用端口 {port}")
-                            
-                            # 强制终止进程
-                            subprocess.run(
-                                ['taskkill', '/F', '/T', '/PID', pid],
-                                capture_output=True, timeout=10
-                            )
-            
-            # 方法2: 使用 PowerShell (备用)
-            ps_cmd = f"Get-NetTCPConnection -LocalPort {port} | ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force }}"
-            subprocess.run(
-                ['powershell', '-Command', ps_cmd],
-                capture_output=True, timeout=10
-            )
-            
-        except Exception as e:
-            self.logger.warning(f"通过端口杀死进程失败: {e}")
-
-    async def _force_clean_file_locks(self):
-        """强制清理文件锁"""
-        try:
-            working_dir = self.config_manager.get_server_working_directory()
-            if not working_dir:
-                start_script = self.config_manager.get_server_start_script()
-                working_dir = os.path.dirname(start_script)
-                
-            import time
-            
-            files_to_clean = [
-                os.path.join(working_dir, "session.lock"),
-                os.path.join(working_dir, "world", "session.lock"),
-                os.path.join(working_dir, "world_nether", "session.lock"),
-                os.path.join(working_dir, "world_the_end", "session.lock"),
-            ]
-            
-            for file_path in files_to_clean:
-                if os.path.exists(file_path):
-                    try:
-                        # 多次尝试删除
-                        for attempt in range(3):
-                            try:
-                                os.remove(file_path)
-                                self.logger.info(f"已删除: {file_path}")
-                                break
-                            except Exception:
-                                if attempt < 2:
-                                    await asyncio.sleep(1)
-                                else:
-                                    raise
-                    except Exception as e:
-                        self.logger.warning(f"无法删除 {file_path}: {e}")
-                        
-        except Exception as e:
-            self.logger.error(f"强制清理文件锁失败: {e}")
-
-    async def _is_port_in_use(self, host: str, port: int) -> bool:
-        """检查端口是否被占用"""
-        try:
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
-                result = s.connect_ex((host, port))
-                return result == 0
-        except:
-            return False
-    
-    async def handle_crash(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
-        """处理crash命令(管理员) - 获取最新的崩溃报告"""
-        try:
-            import os
-            from pathlib import Path
-            
-            # 从 working_directory 查找 crash-reports
-            working_dir = self.config_manager.get_server_working_directory()
-            if not working_dir:
-                start_script = self.config_manager.get_server_start_script()
-                working_dir = os.path.dirname(start_script)
-            
-            crash_dir = os.path.join(working_dir, "crash-reports")
-            crash_path = Path(crash_dir)
-            
-            if not crash_path.exists():
-                return f"crash-reports 目录不存在: {crash_dir}"
-            
-            # 查找所有crash文件
-            crash_files = list(crash_path.glob("crash-*.txt"))
-            
-            if not crash_files:
-                return "未找到任何崩溃报告"
-            
-            # 按修改时间排序，获取最新的
-            latest_crash = max(crash_files, key=lambda p: p.stat().st_mtime)
-            
-            self.logger.info(f"找到最新崩溃报告: {latest_crash.name}")
-            
-            # 发送文件
-            await self.qq_server._send_crash_report_file(websocket, user_id, group_id, str(latest_crash), is_private)
-            
-            return None  # 文件已通过 _send_crash_report_file 发送
-            
-        except Exception as e:
-            self.logger.error(f"处理崩溃报告失败: {e}", exc_info=True)
-            return f"处理崩溃报告失败: {e}"
-
-    async def handle_listeners(self, **kwargs) -> str:
-        """处理 listeners 命令 - 显示所有自定义监听规则"""
-        try:
-            if not self.qq_server.custom_listener:
-                return "自定义消息监听器未初始化"
-            
-            return self.qq_server.custom_listener.get_rules_info()
-            
-        except Exception as e:
-            self.logger.error(f"执行 listeners 命令失败: {e}", exc_info=True)
-            return f"获取监听规则失败: {e}"

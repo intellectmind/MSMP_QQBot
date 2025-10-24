@@ -21,7 +21,7 @@ class QQBotWebSocketServer:
     """
     
     def __init__(self, port: int, allowed_groups: List[int], msmp_client, logger: logging.Logger, 
-             access_token: str = "", config_manager=None, rcon_client=None):
+                 access_token: str = "", config_manager=None, rcon_client=None, connection_manager=None):
         self.port = port
         self.allowed_groups = allowed_groups
         self.msmp_client = msmp_client
@@ -29,6 +29,7 @@ class QQBotWebSocketServer:
         self.logger = logger
         self.access_token = access_token
         self.config_manager = config_manager
+        self.connection_manager = connection_manager
         
         self.current_connection = None
         self.server = None
@@ -36,7 +37,6 @@ class QQBotWebSocketServer:
         self.server_process = None
         self.server_stopping = False
         
-        # ============ 使用deque替代list，限制日志大小 ============
         max_logs = config_manager.get_max_server_logs() if config_manager else 100
         self.server_logs = deque(maxlen=max_logs)
         self.logger.info(f"初始化服务器日志缓冲区 (最大容量: {max_logs}条)")
@@ -66,12 +66,10 @@ class QQBotWebSocketServer:
         else:
             self.custom_listener = None
         
-        # ============ 注册配置重载回调 ============
+        # 注册配置重载回调
         if self.config_manager:
             self.config_manager.register_reload_callback(self._on_config_reload)
             self.logger.info("已注册配置重载回调")
-    
-    # ============ 配置热重载相关方法 ============
     
     async def _on_config_reload(self, old_config: Dict, new_config: Dict):
         """配置重载时的回调函数
@@ -969,51 +967,73 @@ class QQBotWebSocketServer:
                 start_script = self.config_manager.get_server_start_script()
                 working_dir = os.path.dirname(start_script)
             
+            cleaned_files = []
+            
             # 1. 检查并清理 session.lock 文件
             session_lock = os.path.join(working_dir, "session.lock")
             if os.path.exists(session_lock):
-                self.logger.warning(f"发现残留的session.lock文件: {session_lock}")
+                # 检查文件是否真的被占用（尝试删除）
                 try:
                     os.remove(session_lock)
-                    self.logger.info("已清理session.lock文件")
+                    cleaned_files.append("session.lock")
+                    self.logger.info("已清理主锁文件")
+                except PermissionError:
+                    self.logger.warning("主锁文件被占用，无法删除")
                 except Exception as e:
-                    self.logger.warning(f"无法删除session.lock: {e}")
+                    self.logger.debug(f"清理主锁文件时出错: {e}")
             
             # 2. 检查世界目录中的session.lock
             world_dirs = ["world", "world_nether", "world_the_end"]
             for world_dir in world_dirs:
                 world_lock = os.path.join(working_dir, world_dir, "session.lock")
                 if os.path.exists(world_lock):
-                    self.logger.warning(f"发现世界锁文件: {world_lock}")
                     try:
-                        os.remove(world_lock)
-                        self.logger.info(f"已清理世界锁文件: {world_lock}")
+                        # 检查文件大小和修改时间，判断是否真的需要清理
+                        file_size = os.path.getsize(world_lock)
+                        file_mtime = os.path.getmtime(world_lock)
+                        current_time = time.time()
+                        
+                        # 如果文件很小且是最近创建的，可能是残留锁文件
+                        if file_size < 100 and (current_time - file_mtime) < 3600:  # 1小时内创建的小文件
+                            os.remove(world_lock)
+                            cleaned_files.append(f"{world_dir}/session.lock")
+                            self.logger.debug(f"已清理世界锁文件: {world_dir}")
+                        else:
+                            self.logger.debug(f"跳过正常的世界锁文件: {world_dir} (大小: {file_size}字节)")
+                            
+                    except PermissionError:
+                        self.logger.warning(f"世界锁文件被占用: {world_dir}")
                     except Exception as e:
-                        self.logger.warning(f"无法删除世界锁文件 {world_lock}: {e}")
+                        self.logger.debug(f"清理世界锁文件 {world_dir} 时出错: {e}")
             
             # 3. 检查并清理 logs/latest.log 文件
             latest_log = os.path.join(working_dir, "logs", "latest.log")
             if os.path.exists(latest_log):
-                self.logger.warning(f"发现被占用的latest.log文件: {latest_log}")
                 try:
-                    # 先尝试重命名而不是直接删除
-                    backup_name = os.path.join(working_dir, "logs", f"latest.log.backup.{int(time.time())}")
-                    os.rename(latest_log, backup_name)
-                    self.logger.info(f"已重命名latest.log为: {backup_name}")
-                except Exception as e:
-                    self.logger.warning(f"无法处理latest.log: {e}")
-                    # 如果重命名失败，尝试等待后删除
-                    await asyncio.sleep(1)
+                    # 检查文件是否被占用
+                    with open(latest_log, 'a', encoding='utf-8') as test_file:
+                        test_file.write("")  # 尝试写入空内容
+                    
+                    self.logger.debug("latest.log 文件未被占用，无需处理")
+                    
+                except (PermissionError, IOError):
+                    self.logger.warning("latest.log 文件被占用，尝试重命名...")
                     try:
-                        os.remove(latest_log)
-                        self.logger.info("已强制删除latest.log文件")
-                    except Exception as e2:
-                        self.logger.error(f"无法删除latest.log: {e2}")
+                        # 先尝试重命名而不是直接删除
+                        backup_name = os.path.join(working_dir, "logs", f"latest.log.backup.{int(time.time())}")
+                        os.rename(latest_log, backup_name)
+                        cleaned_files.append("logs/latest.log")
+                        self.logger.info(f"已重命名被占用的日志文件: {backup_name}")
+                    except Exception as e:
+                        self.logger.warning(f"重命名日志文件失败: {e}")
             
             # 4. 检查端口占用
             await self._check_port_availability()
             
-            self.logger.info("文件锁和端口检查完成")
+            if cleaned_files:
+                self.logger.info(f"文件锁清理完成: 清理了 {len(cleaned_files)} 个文件")
+            else:
+                self.logger.debug("无需清理文件锁")
             
         except Exception as e:
             self.logger.warning(f"检查文件锁时出错: {e}")
@@ -1138,7 +1158,6 @@ class QQBotWebSocketServer:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=False,
-                bufsize=1,
                 creationflags=creationflags
             )
             
@@ -1217,7 +1236,8 @@ class QQBotWebSocketServer:
             while self.server_process and not self.server_stopping:
                 # 检查进程是否已结束
                 if self.server_process.poll() is not None:
-                    self.logger.info("检测到服务器进程已结束，停止日志采集")
+                    self.logger.info("检测到服务器进程已结束，继续采集剩余输出...")
+                    # 进程结束后继续读取剩余输出
                     break
 
                 try:
@@ -1240,13 +1260,16 @@ class QQBotWebSocketServer:
                         if line_str:
                             print(f"[MC Server] {line_str}")
                             
-                            # 只在未停止时存储日志
-                            if not self.server_stopping:
-                                self._store_server_log(line_str)
+                            # 始终存储日志，即使正在停止
+                            self._store_server_log(line_str)
                             
                             if self._is_server_ready(line_str):
                                 self.logger.info("检测到服务器启动完成")
                                 asyncio.create_task(self._send_server_started_notification())
+                                
+                            # 检查服务器关闭相关的日志
+                            if self._is_server_stopping(line_str):
+                                self.logger.info("检测到服务器正在关闭")
                     else:
                         # 空行处理
                         empty_line_count += 1
@@ -1266,17 +1289,49 @@ class QQBotWebSocketServer:
                     self.logger.error(f"读取输出行失败: {e}")
                     await asyncio.sleep(0.1)
                     continue
-                
-            self.logger.info("=" * 60)
-            self.logger.info("服务器输出采集已结束")
-            self.logger.info("=" * 60)
+            
+            # 进程结束后，继续读取所有剩余输出
+            remaining_output_read = False
+            
+            while True:
+                try:
+                    line_bytes = await asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        lambda: self.server_process.stdout.readline() if self.server_process else b''
+                    )
+                    
+                    if not line_bytes:
+                        break
+                        
+                    try:
+                        line_str = self._decode_line(line_bytes).strip()
+                        if line_str:
+                            print(f"[MC Server] {line_str}")
+                            self._store_server_log(line_str)
+                            remaining_output_read = True
+                    except Exception as e:
+                        self.logger.debug(f"解码剩余输出失败: {e}")
+                        
+                except Exception as e:
+                    self.logger.debug(f"读取剩余输出时出错: {e}")
+                    break
+            
+            if remaining_output_read:
+                self.logger.debug("服务器剩余输出已读取")
+            
+            self.logger.info("服务器输出采集结束")
                     
         except Exception as e:
             self.logger.error(f"读取服务器输出失败: {e}", exc_info=True)
-        finally:
-            # 只有在真正停止时才关闭日志文件
-            if self.server_stopping or (self.server_process and self.server_process.poll() is not None):
-                self._close_log_file()
+
+    def _is_server_stopping(self, line: str) -> bool:
+        """检查服务器是否正在关闭"""
+        line_lower = line.lower()
+        stopping_keywords = [
+            'stopping server',
+            '正在保存世界'
+        ]
+        return any(keyword in line_lower for keyword in stopping_keywords)
 
     def _is_server_ready(self, line: str) -> bool:
         """检查服务器是否启动完成"""
@@ -1293,116 +1348,44 @@ class QQBotWebSocketServer:
                 for group_id in self.allowed_groups:
                     await self.send_group_message(self.current_connection, group_id, message)
                 
-                self.logger.info("已发送服务器启动完成通知到QQ群")
+                self.logger.info("服务器启动完成")
                 
-                await self._reconnect_after_server_start()
+                # 确保关闭模式已重置
+                if hasattr(self, 'command_handlers'):
+                    await self.command_handlers._reset_shutdown_mode()
+                
+                # 使用连接管理器进行连接
+                if hasattr(self, 'connection_manager'):
+                    # 再次确认关闭模式已重置
+                    await self.connection_manager.reset_shutdown_mode()
+                    
+                    
+                    self.logger.info("开始连接MSMP和RCON服务...")
+                    results = await self.connection_manager.connect_after_server_start(delay=5)
+                    
+                    # 记录连接结果
+                    connected_services = []
+                    if results.get('msmp'):
+                        connected_services.append("MSMP")
+                    if results.get('rcon'):
+                        connected_services.append("RCON")
+                    
+                    if connected_services:
+                        self.logger.info(f"已连接: {', '.join(connected_services)}")
+                        
+                        # 发送连接成功通知
+                        if self.current_connection and not self.current_connection.closed:
+                            for group_id in self.allowed_groups:
+                                await self.send_group_message(
+                                    self.current_connection, 
+                                    group_id, 
+                                    f"已连接到: {', '.join(connected_services)}"
+                                )
+                    else:
+                        self.logger.warning("自动连接失败，将在需要时重试")
                 
         except Exception as e:
             self.logger.error(f"发送启动通知失败: {e}")
-
-    async def _reconnect_after_server_start(self):
-        """服务器启动后重新连接MSMP和RCON"""
-        try:
-            self.logger.info("服务器已启动,尝试连接MSMP和RCON...")
-            
-            await asyncio.sleep(15)
-            
-            msmp_task = asyncio.create_task(self._reconnect_msmp_after_start())
-            rcon_task = asyncio.create_task(self._reconnect_rcon_after_start())
-            
-            await asyncio.gather(msmp_task, rcon_task, return_exceptions=True)
-            
-            self.logger.info("服务器启动后连接尝试完成")
-            
-        except Exception as e:
-            self.logger.error(f"重新连接服务失败: {e}", exc_info=True)
-
-    async def _reconnect_msmp_after_start(self):
-        """服务器启动后重新连接MSMP"""
-        try:
-            if self.msmp_client:
-                try:
-                    if self.msmp_client.is_authenticated():
-                        self.logger.info("MSMP已连接,无需重复连接")
-                        return
-
-                    self.logger.info("正在连接MSMP服务器...")
-                    
-                    self.msmp_client.connect_sync()
-                    await asyncio.sleep(5)
-                    
-                    if self.msmp_client.is_authenticated():
-                        self.logger.info("MSMP服务器连接成功")
-                        if self.current_connection and not self.current_connection.closed:
-                            for group_id in self.allowed_groups:
-                                await self.send_group_message(
-                                    self.current_connection, 
-                                    group_id, 
-                                    "已连接到Minecraft服务器管理协议 (MSMP)"
-                                )
-                    else:
-                        self.logger.warning("MSMP服务器连接失败")
-                        if self.current_connection and not self.current_connection.closed:
-                            for group_id in self.allowed_groups:
-                                await self.send_group_message(
-                                    self.current_connection, 
-                                    group_id, 
-                                    "MSMP连接失败,部分功能可能受限"
-                                )
-                        
-                except Exception as e:
-                    self.logger.warning(f"MSMP连接失败: {e}")
-                    if self.current_connection and not self.current_connection.closed:
-                        for group_id in self.allowed_groups:
-                            await self.send_group_message(
-                                self.current_connection, 
-                                group_id, 
-                                f"MSMP连接失败: {e}"
-                            )
-        except Exception as e:
-            self.logger.error(f"重新连接MSMP失败: {e}")
-
-    async def _reconnect_rcon_after_start(self):
-        """服务器启动后重新连接RCON"""
-        try:
-            if self.rcon_client and self.config_manager.is_rcon_enabled():
-                try:
-                    if self.rcon_client.is_connected():
-                        self.logger.info("RCON已连接,无需重复连接")
-                        return
-
-                    self.logger.info("正在连接RCON服务器...")
-                    
-                    if self.rcon_client.connect():
-                        self.logger.info("RCON服务器连接成功")
-                        if self.current_connection and not self.current_connection.closed:
-                            for group_id in self.allowed_groups:
-                                await self.send_group_message(
-                                    self.current_connection, 
-                                    group_id, 
-                                    "已连接到Minecraft服务器远程控制 (RCON)"
-                                )
-                    else:
-                        self.logger.warning("RCON服务器连接失败")
-                        if self.current_connection and not self.current_connection.closed:
-                            for group_id in self.allowed_groups:
-                                await self.send_group_message(
-                                    self.current_connection, 
-                                    group_id, 
-                                    "RCON连接失败,游戏命令执行功能受限"
-                                )
-                        
-                except Exception as e:
-                    self.logger.warning(f"RCON连接失败: {e}")
-                    if self.current_connection and not self.current_connection.closed:
-                        for group_id in self.allowed_groups:
-                            await self.send_group_message(
-                                self.current_connection, 
-                                group_id, 
-                                f"RCON连接失败: {e}"
-                            )
-        except Exception as e:
-            self.logger.error(f"重新连接RCON失败: {e}")
 
     async def _monitor_server_process(self, websocket, group_id: int):
         """监控服务器进程状态"""
@@ -1416,7 +1399,10 @@ class QQBotWebSocketServer:
             
             self.logger.info(f"服务器进程退出,返回码: {return_code}")
             
-            # 服务器停止时立即关闭所有连接
+            # 等待日志采集任务完成（给一点时间读取剩余输出）
+            await asyncio.sleep(2)
+            
+            # 服务器停止时关闭所有连接
             if hasattr(self, 'command_handlers'):
                 await self.command_handlers._close_all_connections()
             else:

@@ -14,7 +14,7 @@ msmp:
 # RCON连接配置
 rcon:
   # 是否启用RCON（与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
-  enabled: false
+  enabled: true
   # RCON服务器地址
   host: localhost
   # RCON端口
@@ -91,7 +91,7 @@ notifications:
   # 是否发送服务器事件通知（启动/关闭）
   server_events: true
   # 是否发送玩家事件通知（加入/离开）
-  player_events: true
+  player_events: false
   # 是否在控制台显示详细消息日志
   log_messages: false
   # 需搭配chunkmonitor插件使用，并启用控制台（https://github.com/intellectmind/ChunkMonitor）
@@ -131,6 +131,9 @@ scheduled_tasks:
     times:
       - "08:00"    # 早上8点启动
       - "18:00"    # 下午6点启动，可添加更多/删除
+    # 执行的星期 (0=周一, 1=周二, ..., 6=周日)
+    # 示例: [0, 1, 2, 3, 4] = 周一到周五
+    weekdays: [0, 1, 2, 3, 4, 5, 6]  # 每天启动
     # 启动前通知 (秒数，0=不通知)
     pre_notify_seconds: 300  # 提前5分钟通知
     # 通知消息
@@ -144,6 +147,9 @@ scheduled_tasks:
     times:
       - "12:00"    # 中午12点关闭
       - "23:59"    # 晚上11:59关闭，可添加更多/删除
+    # 执行的星期 (0=周一, 1=周二, ..., 6=周日)
+    # 示例: [0, 1, 2, 3, 4, 5] = 周一到周六
+    weekdays: [0, 1, 2, 3, 4, 5]  # 周一到周六关闭
     # 关闭前警告 (秒数，0=不通知)
     warning_before_seconds: 600  # 提前10分钟警告
     # 第一次警告消息
@@ -161,6 +167,9 @@ scheduled_tasks:
     times:
       - "04:00"    # 凌晨4点重启
       - "16:00"    # 下午4点重启，可添加更多/删除
+    # 执行的星期 (0=周一, 1=周二, ..., 6=周日)
+    # 示例: [0, 2, 4, 6] = 周一、周三、周五、周日
+    weekdays: [0, 1, 2, 3, 4, 5, 6]  # 每天重启
     # 重启前警告 (秒数，0=不通知)
     warning_before_seconds: 600  # 提前10分钟警告
     # 第一次警告消息

@@ -197,32 +197,35 @@ class ConfigManager:
                 'max_server_logs': 100,
             },
             'scheduled_tasks': {
+            'enabled': False,
+            'auto_start': {
                 'enabled': False,
-                'auto_start': {
-                    'enabled': False,
-                    'times': ['08:00', '18:00'],
-                    'pre_notify_seconds': 300,
-                    'notify_message': '服务器将在 {countdown} 秒后启动，请做好准备'
-                },
-                'auto_stop': {
-                    'enabled': False,
-                    'times': ['12:00', '23:59'],
-                    'warning_before_seconds': 600,
-                    'first_warning': '服务器将在 {countdown} 秒后关闭，请保存游戏',
-                    'second_warning': '服务器即将在 1 分钟后关闭',
-                    'immediate_message': '服务器正在关闭',
-                },
-                'auto_restart': {
-                    'enabled': False,
-                    'times': ['04:00', '16:00'],
-                    'warning_before_seconds': 600,
-                    'first_warning': '服务器将在 {countdown} 秒后重启，请保存游戏',
-                    'second_warning': '服务器即将在 1 分钟后重启',
-                    'immediate_message': '服务器正在重启',
-                    'wait_before_startup': 10,
-                    'restart_success_message': '服务器已重启，欢迎回来！'
-                }
+                'times': ['08:00', '18:00'],
+                'weekdays': [0, 1, 2, 3, 4, 5, 6],
+                'pre_notify_seconds': 300,
+                'notify_message': '服务器将在 {countdown} 秒后启动，请做好准备'
             },
+            'auto_stop': {
+                'enabled': False,
+                'times': ['12:00', '23:59'],
+                'weekdays': [0, 1, 2, 3, 4, 5, 6],
+                'warning_before_seconds': 600,
+                'first_warning': '服务器将在 {countdown} 秒后关闭，请保存游戏',
+                'second_warning': '服务器即将在 1 分钟后关闭',
+                'immediate_message': '服务器正在关闭',
+            },
+            'auto_restart': {
+                'enabled': False,
+                'times': ['04:00', '16:00'],
+                'weekdays': [0, 1, 2, 3, 4, 5, 6],
+                'warning_before_seconds': 600,
+                'first_warning': '服务器将在 {countdown} 秒后重启，请保存游戏',
+                'second_warning': '服务器即将在 1 分钟后重启',
+                'immediate_message': '服务器正在重启',
+                'wait_before_startup': 10,
+                'restart_success_message': '服务器已重启，欢迎回来！'
+            }
+        },
             'custom_listeners': {
                 'enabled': False,
                 'rules': []

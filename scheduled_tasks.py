@@ -10,14 +10,20 @@ from dataclasses import dataclass
 class ScheduledTask:
     """定时任务"""
     task_id: str
-    task_type: str  # 'start' 或 'stop'
+    task_type: str  # 'start' 或 'stop' 或 'restart'
     scheduled_time: str  # HH:MM 格式
+    weekdays: List[int]  # 执行的星期 [0=周一, 6=周日]
     last_executed: Optional[float] = None
     enabled: bool = True
 
 
 class ScheduledTaskManager:
-    """定时任务管理器"""
+    """定时任务管理器 - 支持星期配置"""
+    
+    WEEKDAY_NAMES = {
+        0: '周一', 1: '周二', 2: '周三', 3: '周四',
+        4: '周五', 5: '周六', 6: '周日'
+    }
     
     def __init__(self, config_manager, qq_server, logger: logging.Logger):
         self.config_manager = config_manager
@@ -26,7 +32,6 @@ class ScheduledTaskManager:
         
         self.tasks: List[ScheduledTask] = []
         self.running = False
-        self.task_loop = None
         self.scheduler_task = None
         
         # 回调函数
@@ -50,43 +55,55 @@ class ScheduledTaskManager:
             auto_start_config = scheduled_config.get('auto_start', {})
             if auto_start_config.get('enabled', False):
                 start_times = auto_start_config.get('times', [])
+                start_weekdays = auto_start_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
+                
                 for i, time_str in enumerate(start_times):
                     task = ScheduledTask(
                         task_id=f"auto_start_{i}",
                         task_type='start',
                         scheduled_time=time_str,
+                        weekdays=start_weekdays,
                         enabled=True
                     )
                     self.tasks.append(task)
-                    self.logger.info(f"已加载自动启动任务: {time_str}")
+                    weekday_names = [self.WEEKDAY_NAMES[d] for d in start_weekdays]
+                    self.logger.info(f"已加载自动启动任务: {time_str} ({','.join(weekday_names)})")
             
-            # 加载自动关闭任务
+            # 加载自动停止任务
             auto_stop_config = scheduled_config.get('auto_stop', {})
             if auto_stop_config.get('enabled', False):
                 stop_times = auto_stop_config.get('times', [])
+                stop_weekdays = auto_stop_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
+                
                 for i, time_str in enumerate(stop_times):
                     task = ScheduledTask(
                         task_id=f"auto_stop_{i}",
                         task_type='stop',
                         scheduled_time=time_str,
+                        weekdays=stop_weekdays,
                         enabled=True
                     )
                     self.tasks.append(task)
-                    self.logger.info(f"已加载自动关闭任务: {time_str}")
+                    weekday_names = [self.WEEKDAY_NAMES[d] for d in stop_weekdays]
+                    self.logger.info(f"已加载自动停止任务: {time_str} ({','.join(weekday_names)})")
             
             # 加载自动重启任务
             auto_restart_config = scheduled_config.get('auto_restart', {})
             if auto_restart_config.get('enabled', False):
                 restart_times = auto_restart_config.get('times', [])
+                restart_weekdays = auto_restart_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
+                
                 for i, time_str in enumerate(restart_times):
                     task = ScheduledTask(
                         task_id=f"auto_restart_{i}",
                         task_type='restart',
                         scheduled_time=time_str,
+                        weekdays=restart_weekdays,
                         enabled=True
                     )
                     self.tasks.append(task)
-                    self.logger.info(f"已加载自动重启任务: {time_str}")
+                    weekday_names = [self.WEEKDAY_NAMES[d] for d in restart_weekdays]
+                    self.logger.info(f"已加载自动重启任务: {time_str} ({','.join(weekday_names)})")
             
             self.logger.info(f"共加载 {len(self.tasks)} 个定时任务")
             
@@ -98,7 +115,7 @@ class ScheduledTaskManager:
         self.on_start_callback = callback
     
     def set_stop_callback(self, callback: Callable):
-        """设置关闭回调函数"""
+        """设置停止回调函数"""
         self.on_stop_callback = callback
     
     def set_restart_callback(self, callback: Callable):
@@ -118,7 +135,6 @@ class ScheduledTaskManager:
         self.running = True
         self.logger.info("定时任务管理器已启动")
         
-        # 创建异步任务
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
     
     def stop(self):
@@ -138,6 +154,7 @@ class ScheduledTaskManager:
             while self.running:
                 try:
                     current_time = datetime.datetime.now()
+                    current_weekday = current_time.weekday()  # 0=周一, 6=周日
                     current_hour_minute = current_time.strftime("%H:%M")
                     current_timestamp = time.time()
                     
@@ -145,20 +162,24 @@ class ScheduledTaskManager:
                         if not task.enabled:
                             continue
                         
+                        # 检查星期是否匹配
+                        if current_weekday not in task.weekdays:
+                            continue
+                        
                         # 检查是否到达定时时间
                         if task.scheduled_time == current_hour_minute:
                             # 防止重复执行 (同一分钟内只执行一次)
                             if task.last_executed is not None:
                                 time_since_last = current_timestamp - task.last_executed
-                                if time_since_last < 60:  # 60秒内已执行过
+                                if time_since_last < 60:
                                     continue
                             
                             # 执行任务
                             await self._execute_task(task, current_time)
                             task.last_executed = current_timestamp
                     
-                    # 检查即将到达的任务,发送提前通知
-                    await self._check_upcoming_tasks(current_time)
+                    # 检查即将到达的任务，发送提前通知
+                    await self._check_upcoming_tasks(current_time, current_weekday)
                     
                     # 每10秒检查一次
                     await asyncio.sleep(10)
@@ -174,13 +195,17 @@ class ScheduledTaskManager:
         except Exception as e:
             self.logger.error(f"定时任务调度循环异常: {e}", exc_info=True)
     
-    async def _check_upcoming_tasks(self, current_time: datetime.datetime):
+    async def _check_upcoming_tasks(self, current_time: datetime.datetime, current_weekday: int):
         """检查即将到达的任务并发送提前通知"""
         try:
             scheduled_config = self.config_manager.config.get('scheduled_tasks', {})
             
             for task in self.tasks:
                 if not task.enabled:
+                    continue
+                
+                # 检查星期是否匹配
+                if current_weekday not in task.weekdays:
                     continue
                 
                 # 解析计划时间
@@ -197,7 +222,6 @@ class ScheduledTaskManager:
                     config = scheduled_config.get('auto_start', {})
                     pre_notify = config.get('pre_notify_seconds', 300)
                     
-                    # 在任务执行前 pre_notify 秒时发送通知
                     if 0 <= time_until_task < pre_notify and time_until_task > pre_notify - 10:
                         await self._send_notify(
                             task,
@@ -209,7 +233,6 @@ class ScheduledTaskManager:
                     config = scheduled_config.get('auto_stop', {})
                     warning_before = config.get('warning_before_seconds', 600)
                     
-                    # 第一次警告 (提前 warning_before 秒)
                     if 0 <= time_until_task < warning_before and time_until_task > warning_before - 10:
                         await self._send_notify(
                             task,
@@ -217,7 +240,6 @@ class ScheduledTaskManager:
                             int(time_until_task)
                         )
                     
-                    # 第二次警告 (提前1分钟)
                     elif 50 <= time_until_task < 70:
                         await self._send_notify(
                             task,
@@ -229,7 +251,6 @@ class ScheduledTaskManager:
                     config = scheduled_config.get('auto_restart', {})
                     warning_before = config.get('warning_before_seconds', 600)
                     
-                    # 第一次警告 (提前 warning_before 秒)
                     if 0 <= time_until_task < warning_before and time_until_task > warning_before - 10:
                         await self._send_notify(
                             task,
@@ -237,7 +258,6 @@ class ScheduledTaskManager:
                             int(time_until_task)
                         )
                     
-                    # 第二次警告 (提前1分钟)
                     elif 50 <= time_until_task < 70:
                         await self._send_notify(
                             task,
@@ -251,10 +271,10 @@ class ScheduledTaskManager:
     async def _execute_task(self, task: ScheduledTask, current_time: datetime.datetime):
         """执行定时任务"""
         try:
-            self.logger.info(f"执行定时任务: {task.task_id} ({task.task_type}) - {task.scheduled_time}")
+            weekday_name = self.WEEKDAY_NAMES[current_time.weekday()]
+            self.logger.info(f"执行定时任务: {task.task_id} ({task.task_type}) - {task.scheduled_time} ({weekday_name})")
             
             if task.task_type == 'start':
-                # 检查服务器是否已在运行
                 if (self.qq_server.server_process and 
                     self.qq_server.server_process.poll() is None):
                     self.logger.warning(f"服务器已在运行,跳过启动任务")
@@ -269,22 +289,20 @@ class ScheduledTaskManager:
                     self.logger.warning("启动回调函数未设置")
             
             elif task.task_type == 'stop':
-                # 检查服务器是否在运行
                 if not (self.qq_server.server_process and 
                         self.qq_server.server_process.poll() is None):
-                    self.logger.warning(f"服务器未运行,跳过关闭任务")
-                    await self._send_notify(task, "服务器未运行,无需关闭", 0)
+                    self.logger.warning(f"服务器未运行,跳过停止任务")
+                    await self._send_notify(task, "服务器未运行,无需停止", 0)
                     return
                 
-                self.logger.info(f"执行关闭任务: {task.scheduled_time}")
+                self.logger.info(f"执行停止任务: {task.scheduled_time}")
                 
                 if self.on_stop_callback:
                     await self.on_stop_callback(task)
                 else:
-                    self.logger.warning("关闭回调函数未设置")
+                    self.logger.warning("停止回调函数未设置")
             
             elif task.task_type == 'restart':
-                # 检查服务器是否在运行
                 if not (self.qq_server.server_process and 
                         self.qq_server.server_process.poll() is None):
                     self.logger.warning(f"服务器未运行,跳过重启任务")
@@ -293,20 +311,16 @@ class ScheduledTaskManager:
                 
                 self.logger.info(f"执行重启任务: {task.scheduled_time}")
                 
-                # 关闭服务器 (stop 命令会自动保存)
                 if self.on_stop_callback:
                     await self.on_stop_callback(task)
                 
-                # 获取重启配置
                 scheduled_config = self.config_manager.config.get('scheduled_tasks', {})
                 restart_config = scheduled_config.get('auto_restart', {})
                 
-                # 等待一段时间后重启
                 wait_time = restart_config.get('wait_before_startup', 10)
                 self.logger.info(f"等待 {wait_time} 秒后重启服务器...")
                 await asyncio.sleep(wait_time)
                 
-                # 启动服务器
                 if self.on_restart_callback:
                     await self.on_restart_callback(task)
                 else:
@@ -339,7 +353,7 @@ class ScheduledTaskManager:
         if not self.tasks:
             return "未配置任何定时任务"
         
-        message = "定时任务列表\n" + "=" * 40 + "\n"
+        message = "定时任务列表\n" + "=" * 50 + "\n"
         
         start_tasks = [t for t in self.tasks if t.task_type == 'start']
         stop_tasks = [t for t in self.tasks if t.task_type == 'stop']
@@ -349,21 +363,24 @@ class ScheduledTaskManager:
             message += "启动任务:\n"
             for task in start_tasks:
                 status = "启用" if task.enabled else "禁用"
-                message += f"  • {task.scheduled_time} [{status}]\n"
+                weekday_names = [self.WEEKDAY_NAMES[d] for d in task.weekdays]
+                message += f"  • {task.scheduled_time} [{status}] ({','.join(weekday_names)})\n"
         
         if stop_tasks:
-            message += "\n关闭任务:\n"
+            message += "\n停止任务:\n"
             for task in stop_tasks:
                 status = "启用" if task.enabled else "禁用"
-                message += f"  • {task.scheduled_time} [{status}]\n"
+                weekday_names = [self.WEEKDAY_NAMES[d] for d in task.weekdays]
+                message += f"  • {task.scheduled_time} [{status}] ({','.join(weekday_names)})\n"
         
         if restart_tasks:
             message += "\n重启任务:\n"
             for task in restart_tasks:
                 status = "启用" if task.enabled else "禁用"
-                message += f"  • {task.scheduled_time} [{status}]\n"
+                weekday_names = [self.WEEKDAY_NAMES[d] for d in task.weekdays]
+                message += f"  • {task.scheduled_time} [{status}] ({','.join(weekday_names)})\n"
         
-        message += "=" * 40
+        message += "=" * 50
         return message
     
     def disable_task(self, task_id: str) -> bool:

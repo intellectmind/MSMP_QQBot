@@ -46,18 +46,17 @@ class MSMPClient:
         self.heartbeat_task = None
         self.receive_task = None
         
-        # 重连控制
-        self.reconnecting = False
-        self.reconnect_lock = asyncio.Lock()
-        self.max_reconnect_delay = 300
-        self.reconnect_attempts = 0
-        
         self.loop = asyncio.new_event_loop()
         self.thread = None
     
     async def connect(self):
         """连接到MSMP服务器"""
         try:
+            # 检查是否已经连接
+            if self.connected and self.websocket and not self.websocket.closed:
+                self.logger.debug("MSMP已经连接，无需重复连接")
+                return True
+                
             headers = {"Authorization": f"Bearer {self.auth_token}"}
             self.websocket = await websockets.connect(
                 f"ws://{self.host}:{self.port}",
@@ -70,7 +69,6 @@ class MSMPClient:
             self.connected = True
             self.authenticated = True
             self.last_pong_time = time.time()
-            self.reconnect_attempts = 0
             self.logger.info(f"已连接到MSMP服务器 {self.host}:{self.port}")
             
             # 启动消息接收循环
@@ -80,27 +78,33 @@ class MSMPClient:
             await asyncio.sleep(2)
             self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             
-            # 验证连接有效性
-            try:
-                test_response = await asyncio.wait_for(
-                    self.send_request("server/status"),
-                    timeout=10.0
-                )
-                self.logger.info("MSMP连接验证成功")
-                return True
-                
-            except asyncio.TimeoutError:
-                self.logger.warning("连接验证超时，但保持连接状态")
-                return True
-            except Exception as e:
-                self.logger.warning(f"连接验证失败: {e}，但保持连接状态")
-                return True
-        
+            return True
+            
         except Exception as e:
             self.logger.error(f"连接MSMP服务器失败: {e}")
             self.connected = False
             self.authenticated = False
             raise
+    
+    def set_shutdown_mode(self):
+        """设置关闭模式，停止所有活动"""
+        self.connected = False
+        self.authenticated = False
+        
+        # 取消所有任务
+        if self.heartbeat_task and not self.heartbeat_task.done():
+            self.heartbeat_task.cancel()
+        
+        if self.receive_task and not self.receive_task.done():
+            self.receive_task.cancel()
+        
+        # 清理pending请求
+        for request_id, future in list(self.pending_requests.items()):
+            if not future.done():
+                future.set_exception(Exception("连接已关闭"))
+        self.pending_requests.clear()
+        
+        self.logger.debug("MSMP客户端已进入关闭模式")
     
     async def _heartbeat_loop(self):
         """心跳检测循环"""
@@ -126,35 +130,20 @@ class MSMPClient:
                         self.logger.warning(f"心跳超时 (连续失败: {consecutive_failures}/{max_consecutive_failures})")
                         
                         if consecutive_failures >= max_consecutive_failures:
-                            self.logger.error("心跳连续失败，触发重连")
-                            await self.attempt_reconnect()
+                            self.logger.error("心跳连续失败，连接可能已断开")
                             break
                     
                     # 检查上次成功时间
                     time_since_last_success = time.time() - self.last_pong_time
                     if time_since_last_success > self.heartbeat_timeout:
-                        self.logger.warning(f"心跳超时 ({time_since_last_success:.1f}秒)，重新连接...")
-                        await self.attempt_reconnect()
+                        self.logger.warning(f"心跳超时 ({time_since_last_success:.1f}秒)，连接可能已断开")
                         break
                 
                 await asyncio.sleep(self.heartbeat_interval)
                 
             except Exception as e:
                 self.logger.error(f"心跳循环异常: {e}")
-                await self.attempt_reconnect()
                 break
-    
-    def get_detailed_status(self) -> dict:
-        """获取详细连接状态"""
-        return {
-            "connected": self.connected,
-            "authenticated": self.authenticated,
-            "websocket_open": self.websocket and not self.websocket.closed,
-            "pending_requests": len(self.pending_requests),
-            "last_pong_time": self.last_pong_time,
-            "time_since_last_pong": time.time() - self.last_pong_time if self.last_pong_time else None,
-            "reconnect_attempts": self.reconnect_attempts
-        }
 
     async def _receive_loop(self):
         """消息接收循环"""
@@ -169,13 +158,11 @@ class MSMPClient:
             self.logger.info(f"MSMP连接已关闭: {e}")
             self.connected = False
             self.authenticated = False
-            asyncio.create_task(self.attempt_reconnect())
             
         except Exception as e:
             self.logger.error(f"接收循环异常: {e}", exc_info=True)
             self.connected = False
             self.authenticated = False
-            asyncio.create_task(self.attempt_reconnect())
     
     async def _handle_message(self, message: str):
         """处理接收到的消息"""
@@ -315,50 +302,7 @@ class MSMPClient:
         """获取游戏规则"""
         response = await self.send_request("gamerules")
         return response
-    
-    async def attempt_reconnect(self):
-        """尝试重新连接 - 使用锁防止并发重连"""
-        if self.reconnecting:
-            return
-        
-        async with self.reconnect_lock:
-            if self.reconnecting:
-                return
-            
-            self.reconnecting = True
-            
-            try:
-                # 清理状态
-                self.connected = False
-                self.authenticated = False
-                
-                # 取消心跳任务
-                if self.heartbeat_task and not self.heartbeat_task.done():
-                    self.heartbeat_task.cancel()
-                
-                # 关闭WebSocket连接
-                if self.websocket and not self.websocket.closed:
-                    await self.websocket.close()
-                
-                # 指数退避重连
-                self.reconnect_attempts += 1
-                delay = min(
-                    5 * (2 ** (self.reconnect_attempts - 1)),
-                    self.max_reconnect_delay
-                )
-                
-                self.logger.info(f"第 {self.reconnect_attempts} 次重连尝试，{delay}秒后执行...")
-                await asyncio.sleep(delay)
-                
-                # 尝试重新连接
-                await self.connect()
-                self.logger.info("重新连接成功")
-                
-            except Exception as e:
-                self.logger.error(f"重新连接失败: {e}")
-            finally:
-                self.reconnecting = False
-    
+
     async def close(self):
         """关闭连接"""
         self.connected = False

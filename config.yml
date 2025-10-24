@@ -61,6 +61,39 @@ commands:
   # TPS命令配置 - 群内使用tps命令时执行的指令，可根据服务器类型自定义
   tps_command: tps
 
+  # TPS正则表达式 - 用于从服务器返回的TPS信息中提取TPS数值
+  # 使用custom_listeners的 {server_tps} 占位符时，必须配置此项，并返回唯一一个TPS值如20.0
+  # 注意：颜色代码会自动被清理，所以此正则表达式应该匹配清理后的文本
+  # 
+  # Paper服务器标准输出（颜色代码已清理）：
+  # "TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0"
+  #
+  # 常见服务器配置示例：
+  #   - Paper标准格式: 'TPS from last 1m, 5m, 15m:\s*([\d.]+)'
+  #   - Spigot格式: 'TPS:\s*([\d.]+)'
+  #   - Bukkit格式: 'Ticks per second:\s*([\d.]+)'
+  #   - 需要根据你的服务器实际输出调整正则表达式
+  tps_regex: 'TPS from last 1m, 5m, 15m:\s*([\d.]+)'
+
+  # TPS正则表达式捕获组索引 - 指定使用正则表达式中的第几个捕获组
+  # 说明：
+  #   - 正则表达式中的括号()表示捕获组，从1开始计数
+  #   - 示例1: 对于 'TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0'
+  #     使用正则 'TPS from last 1m, 5m, 15m:\s*([\d.]+)' 
+  #     捕获组1就是第一个数值20.0（1分钟平均TPS）
+  #   - 示例2: 要获取5分钟TPS，使用正则
+  #     'TPS from last 1m, 5m, 15m:\s*[\d.]+,\s*([\d.]+)'
+  #     然后将此项设置为2（推荐，更稳定）
+  #   - 示例3: 要获取15分钟TPS，使用正则
+  #     'TPS from last 1m, 5m, 15m:\s*[\d.]+,\s*[\d.]+,\s*([\d.]+)'
+  #     然后将此项设置为3（长期趋势，最稳定）
+  tps_group_index: 1
+
+  # 是否在TPS查询结果中显示原始的服务器返回值
+  # 设置为 true: 同时显示解析的TPS值和原始服务器信息（已清理颜色代码）
+  # 设置为 false: 只显示解析的TPS值
+  tps_show_raw_output: true
+
   # 基础命令开关配置，管理员不受此限制，始终可以使用所有命令
   enabled_commands:
     list: true    # 玩家列表命令

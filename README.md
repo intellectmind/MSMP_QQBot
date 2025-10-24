@@ -79,19 +79,29 @@
 
 ```
 系统命令 (使用 # 前缀):
-  #status          - 查看系统连接状态  
-  #reload          - 重新加载配置文件  
-  #logs            - 显示日志文件信息  
-  #help            - 显示此帮助信息  
-  #exit            - 退出程序  
-  #logstats        - 查看日志系统统计信息  
+  #status          - 查看系统连接状态
+  #reload          - 重新加载配置文件
+  #logs            - 显示日志文件信息
+  #help            - 显示此帮助信息
+  #exit            - 退出程序
+  #logstats        - 查看日志系统统计信息
 
-日志开关命令 (使用 # 前缀):  
-  #toggle_mc_log   - 开启/禁用 MC服务端日志输出  
-  #toggle_bot_log  - 开启/禁用 MSMP_QQBot日志输出  
+日志管理命令 (使用 # 前缀):
   #log_status      - 显示日志开关状态
+  #toggle_mc_log   - 开启/禁用 MC服务端日志输出
+  #toggle_bot_log  - 开启/禁用 MSMP_QQBot日志输出
   #mute_log <关键词>   - 禁用包含指定关键词的日志
   #unmute_log <关键词> - 启用包含指定关键词的日志
+
+日志归档命令 (使用 # 前缀):
+  #archive_logs    - 执行日志归档操作
+  #archive_stats   - 查看日志归档统计信息
+
+连接管理命令 (使用 # 前缀):
+  #connection status - 查看连接管理器状态
+  #reconnect       - 重新连接所有服务 (MSMP和RCON)
+  #reconnect_msmp  - 重新连接MSMP
+  #reconnect_rcon  - 重新连接RCON
 
 服务器管理命令 (使用 # 前缀):
   #start           - 启动Minecraft服务器
@@ -101,35 +111,19 @@
 
 服务器查询命令 (使用 # 前缀):
   #list            - 查看在线玩家列表
-  #tps             - 查看服务器TPS性能
-  #rules           - 查看服务器游戏规则
-
-系统监控命令 (使用 # 前缀):
+  #tps             - 查看服务器TPS(每秒刻数)性能
+  #rules           - 查看服务器游戏规则和设置
   #sysinfo         - 查看系统信息 (CPU、内存、硬盘、网络)
   #disk            - 查看硬盘使用情况
   #process         - 查看Java进程信息
   #network         - 查看网络信息和实时带宽
-
-连接管理命令 (使用 # 前缀):
-  #reconnect       - 重新连接所有服务 (MSMP和RCON)
-  #reconnect_msmp  - 重新连接MSMP
-  #reconnect_rcon  - 重新连接RCON
-
-其他命令 (使用 # 前缀):
-  #listeners       - 查看自定义消息监听规则
+  #listeners       - 查看所有自定义消息监听规则
 
 Minecraft命令 (无 # 前缀):
   直接输入任意Minecraft命令将转发到服务器
   示例: list
         say Hello everyone!
         give @a diamond
-
-日志开关示例:
-  #toggle_mc_log   - 禁用MC服务端日志
-  #toggle_bot_log  - 禁用Bot日志
-  #log_status      - 查看所有日志状态
-  #mute_log ERROR  - 禁用包含 ERROR 的日志
-  #unmute_log ERROR - 启用包含 ERROR 的日志
 ```
 
 ----------------------------------------------------------------------------------------------------------
@@ -157,7 +151,7 @@ msmp:
 # RCON连接配置
 rcon:
   # 是否启用RCON（与MSMP同时启用时优先走MSMP通道，版本1.21.9以下可单独使用这个）
-  enabled: false
+  enabled: true
   # RCON服务器地址
   host: localhost
   # RCON端口
@@ -204,7 +198,7 @@ commands:
   # TPS命令配置 - 群内使用tps命令时执行的指令，可根据服务器类型自定义
   tps_command: tps
 
-  # 基础命令开关配置，管理员不受此限制,始终可以使用所有命令
+  # 基础命令开关配置，管理员不受此限制，始终可以使用所有命令
   enabled_commands:
     list: true    # 玩家列表命令
     tps: true     # TPS查询命令
@@ -234,7 +228,7 @@ notifications:
   # 是否发送服务器事件通知（启动/关闭）
   server_events: true
   # 是否发送玩家事件通知（加入/离开）
-  player_events: true
+  player_events: false
   # 是否在控制台显示详细消息日志
   log_messages: false
   # 需搭配chunkmonitor插件使用，并启用控制台（https://github.com/intellectmind/ChunkMonitor）
@@ -274,6 +268,9 @@ scheduled_tasks:
     times:
       - "08:00"    # 早上8点启动
       - "18:00"    # 下午6点启动，可添加更多/删除
+    # 执行的星期 (0=周一, 1=周二, ..., 6=周日)
+    # 示例: [0, 1, 2, 3, 4] = 周一到周五
+    weekdays: [0, 1, 2, 3, 4, 5, 6]  # 每天启动
     # 启动前通知 (秒数，0=不通知)
     pre_notify_seconds: 300  # 提前5分钟通知
     # 通知消息
@@ -287,6 +284,9 @@ scheduled_tasks:
     times:
       - "12:00"    # 中午12点关闭
       - "23:59"    # 晚上11:59关闭，可添加更多/删除
+    # 执行的星期 (0=周一, 1=周二, ..., 6=周日)
+    # 示例: [0, 1, 2, 3, 4, 5] = 周一到周六
+    weekdays: [0, 1, 2, 3, 4, 5]  # 周一到周六关闭
     # 关闭前警告 (秒数，0=不通知)
     warning_before_seconds: 600  # 提前10分钟警告
     # 第一次警告消息
@@ -304,6 +304,9 @@ scheduled_tasks:
     times:
       - "04:00"    # 凌晨4点重启
       - "16:00"    # 下午4点重启，可添加更多/删除
+    # 执行的星期 (0=周一, 1=周二, ..., 6=周日)
+    # 示例: [0, 2, 4, 6] = 周一、周三、周五、周日
+    weekdays: [0, 1, 2, 3, 4, 5, 6]  # 每天重启
     # 重启前警告 (秒数，0=不通知)
     warning_before_seconds: 600  # 提前10分钟警告
     # 第一次警告消息
@@ -325,6 +328,7 @@ debug: false
 # ============================================================
 # 这个功能允许你通过正则表达式监听服务器日志
 # 匹配成功时可以向QQ群发送消息或向服务端执行指令
+# 可以把最底下的规则配置说明丢给AI，让AI生成
 custom_listeners:
   # 是否启用自定义监听功能
   enabled: false

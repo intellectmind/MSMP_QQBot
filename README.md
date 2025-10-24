@@ -199,6 +199,7 @@ commands:
   tps_command: tps
 
   # TPS正则表达式 - 用于从服务器返回的TPS信息中提取TPS数值
+  # 使用custom_listeners的 {server_tps} 占位符时，必须配置此项，并返回唯一一个TPS值如20.0
   # 注意：颜色代码会自动被清理，所以此正则表达式应该匹配清理后的文本
   # 
   # Paper服务器标准输出（颜色代码已清理）：

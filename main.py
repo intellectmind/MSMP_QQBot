@@ -91,9 +91,17 @@ class ConsoleCommandHandler:
                     if not line:
                         continue
                     
+                    # 首先检查是否是stop命令
+                    if line.lower() == 'stop':
+                        result = await self._handle_console_stop()
+                        print(result)
+                        continue
+                    
+                    # 处理系统命令（带#前缀的）
                     if await self._handle_bot_command(line):
                         continue
                     
+                    # 其他命令转发到Minecraft服务器
                     await self._forward_to_minecraft(line)
                         
             except EOFError:

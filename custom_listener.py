@@ -562,6 +562,10 @@ class CustomMessageListener:
         """
         处理消息并匹配规则
         """
+        # 检查是否启用自定义监听功能
+        if not self.config_manager.is_custom_listeners_enabled():
+            return []
+
         matched_rules = []
         
         # 优先使用传入的context，如果没有才生成

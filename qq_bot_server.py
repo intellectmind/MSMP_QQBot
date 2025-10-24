@@ -63,8 +63,6 @@ class QQBotWebSocketServer:
             except Exception as e:
                 self.logger.error(f"初始化自定义消息监听器失败: {e}")
                 self.custom_listener = None
-        else:
-            self.custom_listener = None
         
         # 注册配置重载回调
         if self.config_manager:
@@ -857,6 +855,8 @@ class QQBotWebSocketServer:
     
     async def _process_server_log(self, log_line: str):
         """处理服务器日志中的自定义监听规则"""
+        if not self.config_manager.is_custom_listeners_enabled():
+            return
         try:
             # 检查连接是否已关闭，如果关闭则跳过处理
             if not self.current_connection or self.current_connection.closed:

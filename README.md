@@ -27,7 +27,7 @@
 注：管理员支持私聊使用所有命令，无管理员权限则只支持群内  
 
 ```
-基础命令:
+【基础命令】
 • list / 在线列表 / 玩家列表
   查看在线玩家列表
 • tps / /tps / 服务器tps
@@ -38,8 +38,10 @@
   查看服务器状态
 • help / 帮助 / /help
   显示帮助信息
+• plugins / 插件 / /plugins
+  显示插件系统状态
 
-管理员命令:
+【管理员专属命令】
 • stop / 停止 / 关闭
   停止Minecraft服务器
 • start / 启动 / 开启
@@ -68,10 +70,16 @@
   查看网络信息和实时带宽速度
 • listeners / 监听规则 / /listeners
   查看所有自定义消息监听规则
+• reload_plugin / 重载插件 / /reload_plugin
+  重新加载指定插件
+• unload_plugin / 卸载插件 / /unload_plugin
+  卸载指定插件
+• load_plugin / 加载插件 / /load_plugin
+  加载指定插件
 
-直接命令执行:
+【直接命令执行】
 • !<命令>
-  管理员可使用 ! 前缀直接执行服务器命令,需启用RCON
+  使用 ! 前缀直接执行服务器命令
   示例: !say Hello 或 !give @a diamond
 ```
 
@@ -108,6 +116,12 @@
   #stop            - 停止Minecraft服务器
   #kill            - 强制杀死服务器进程(不保存数据,紧急用)
   #server_status   - 查看服务器进程状态
+
+插件管理命令 (使用 # 前缀):
+  #plugins         - 显示所有已加载插件状态
+  #load_plugin <插件名>  - 加载指定插件
+  #unload_plugin <插件名> - 卸载指定插件
+  #reload_plugin <插件名> - 重新加载指定插件(热重载)
 
 服务器查询命令 (使用 # 前缀):
   #list            - 查看在线玩家列表

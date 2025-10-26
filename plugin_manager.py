@@ -120,7 +120,7 @@ class PluginManager:
             
             await self._load_plugin_file(plugin_file)
     
-    async def _load_plugin_file(self, plugin_file: Path):
+    async def _load_plugin_file(self, plugin_file: Path) -> bool:
         """加载单个插件文件"""
         try:
             module_name = plugin_file.stem
@@ -134,7 +134,7 @@ class PluginManager:
             spec = importlib.util.spec_from_file_location(module_name, plugin_file)
             if not spec or not spec.loader:
                 self.logger.error(f"无法加载插件模块: {plugin_file}")
-                return
+                return False
             
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
@@ -145,7 +145,7 @@ class PluginManager:
             
             if not plugin_class:
                 self.logger.warning(f"插件 {module_name} 中未找到有效的插件类 (需继承 BotPlugin)")
-                return
+                return False
             
             # 实例化插件
             plugin_instance = plugin_class(self.logger.getChild(f"plugin.{module_name}"))
@@ -158,11 +158,14 @@ class PluginManager:
                 self.plugin_modules[module_name] = module
                 self.loaded_files.add(str(plugin_file.absolute()))
                 self.logger.info(f"插件加载成功: {plugin_instance.name} v{plugin_instance.version} (作者: {plugin_instance.author})")
+                return True  # 明确返回 True
             else:
                 self.logger.error(f"插件加载失败: {module_name}")
+                return False
         
         except Exception as e:
             self.logger.error(f"加载插件 {plugin_file.name} 时出错: {e}", exc_info=True)
+            return False
     
     def _find_plugin_class(self, module) -> Optional[type]:
         """从模块中查找插件类"""
@@ -503,7 +506,7 @@ class PluginManager:
     
     def get_plugin_status(self) -> str:
         """获取插件系统状态信息"""
-        lines = ["插件系统状态", "=" * 40]
+        lines = ["插件系统状态", "=" * 20]
         lines.append(f"已加载插件: {len(self.plugins)}")
         lines.append(f"注册命令: {len(self.command_handlers)}")
         lines.append(f"事件监听器: {sum(len(lst) for lst in self.event_listeners.values())}")
@@ -515,5 +518,4 @@ class PluginManager:
                 lines.append(f"    描述: {plugin.description}")
                 lines.append(f"    状态: {'启用' if plugin.enabled else '禁用'}")
         
-        lines.append("=" * 40)
         return "\n".join(lines)

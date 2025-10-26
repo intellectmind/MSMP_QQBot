@@ -1550,7 +1550,9 @@ class CommandHandlers:
             
             if not self.qq_server.plugin_manager:
                 return "插件管理器未初始化"
-                        
+            
+            self.logger.info(f"开始加载插件: {plugin_name}")
+            
             # 检查插件是否已经加载
             existing_plugin = self.qq_server.plugin_manager.get_plugin(plugin_name)
             if existing_plugin:
@@ -1565,9 +1567,16 @@ class CommandHandlers:
                 if loaded_plugin:
                     return f"插件 '{plugin_name}' 加载成功"
                 else:
-                    return f"插件 '{plugin_name}' 加载异常，请检查插件代码"
+                    self.logger.warning(f"插件 {plugin_name} 加载返回成功但未找到插件实例")
+                    return f"插件 '{plugin_name}' 加载状态异常"
             else:
-                return f"插件 '{plugin_name}' 加载失败，请检查插件文件是否存在"
+                # 检查插件是否实际上加载成功了（处理异步加载的情况）
+                loaded_plugin = self.qq_server.plugin_manager.get_plugin(plugin_name)
+                if loaded_plugin:
+                    self.logger.warning(f"插件 {plugin_name} 加载返回失败但实际已加载")
+                    return f"插件 '{plugin_name}' 已加载（状态报告异常）"
+                else:
+                    return f"插件 '{plugin_name}' 加载失败，请检查插件文件是否存在"
                 
         except Exception as e:
             self.logger.error(f"执行load_plugin命令失败: {e}", exc_info=True)

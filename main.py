@@ -11,6 +11,7 @@ from rcon_client import RCONClient
 from qq_bot_server import QQBotWebSocketServer
 from connection_manager import ConnectionManager, ConnectionStatus
 from log_system import LogManager, AdvancedLogFilter, LogArchiveManager
+from plugin_manager import PluginManager
 
 
 class LogFilter(logging.Filter):
@@ -42,11 +43,11 @@ class LogFilter(logging.Filter):
         self.disabled_loggers.discard(logger_name)
     
     def disable_keyword(self, keyword: str):
-        """禁用包含特定关键词的日志"""
+        """禁用包含特定关键字的日志"""
         self.disabled_keywords.add(keyword)
     
     def enable_keyword(self, keyword: str):
-        """启用包含特定关键词的日志"""
+        """启用包含特定关键字的日志"""
         self.disabled_keywords.discard(keyword)
     
     def is_logger_disabled(self, logger_name: str) -> bool:
@@ -54,7 +55,7 @@ class LogFilter(logging.Filter):
         return logger_name in self.disabled_loggers
     
     def is_keyword_disabled(self, keyword: str) -> bool:
-        """检查关键词是否禁用"""
+        """检查关键字是否禁用"""
         return keyword in self.disabled_keywords
     
     def get_status(self) -> dict:
@@ -75,35 +76,42 @@ class ConsoleCommandHandler:
 
     async def handle_console_input(self):
         """统一处理控制台输入"""
-        loop = asyncio.get_event_loop()
+        import asyncio
         
         print("\n" + "="*60)
         print("控制台已就绪，可以输入命令")
         print("输入 #help 查看系统命令列表")
         print("="*60 + "\n")
         
-        while self.running and self.bot.running:
+        # 使用 asyncio 的异步标准输入
+        loop = asyncio.get_event_loop()
+        
+        while self.running and getattr(self.bot, 'running', True):
             try:
+                # 使用异步方式读取输入，避免阻塞
                 line = await loop.run_in_executor(None, sys.stdin.readline)
                 
-                if line:
-                    line = line.strip()
-                    if not line:
-                        continue
+                if not line:  # EOF 或空输入
+                    self.logger.info("检测到输入流结束")
+                    break
                     
-                    # 首先检查是否是stop命令
-                    if line.lower() == 'stop':
-                        result = await self._handle_console_stop()
-                        print(result)
-                        continue
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # 首先检查是否是stop命令
+                if line.lower() == 'stop':
+                    result = await self._handle_console_stop()
+                    print(result)
+                    continue
+                
+                # 处理系统命令（带#前缀的）
+                if await self._handle_bot_command(line):
+                    continue
+                
+                # 其他命令转发到Minecraft服务器
+                await self._forward_to_minecraft(line)
                     
-                    # 处理系统命令（带#前缀的）
-                    if await self._handle_bot_command(line):
-                        continue
-                    
-                    # 其他命令转发到Minecraft服务器
-                    await self._forward_to_minecraft(line)
-                        
             except EOFError:
                 self.logger.warning("输入流已关闭")
                 break
@@ -117,6 +125,39 @@ class ConsoleCommandHandler:
             return False
         
         system_command = command[1:].strip().lower()
+        
+        # === 插件管理命令 ===
+        if system_command.startswith('reload_plugin '):
+            plugin_name = system_command[14:].strip()
+            if plugin_name:
+                result = await self._handle_qq_command(f'reload_plugin {plugin_name}')
+                print(result)
+            else:
+                print("用法: #reload_plugin <插件名称>")
+            return True
+
+        elif system_command.startswith('unload_plugin '):
+            plugin_name = system_command[14:].strip()
+            if plugin_name:
+                result = await self._handle_qq_command(f'unload_plugin {plugin_name}')
+                print(result)
+            else:
+                print("用法: #unload_plugin <插件名称>")
+            return True
+
+        elif system_command.startswith('load_plugin '):
+            plugin_name = system_command[12:].strip()
+            if plugin_name:
+                result = await self._handle_qq_command(f'load_plugin {plugin_name}')
+                print(result)
+            else:
+                print("用法: #load_plugin <插件名称>")
+            return True
+
+        elif system_command == 'plugins':
+            result = await self._handle_qq_command('plugins')
+            print(result)
+            return True
         
         # === 日志管理命令 ===
         if system_command == 'log_status':
@@ -244,7 +285,7 @@ class ConsoleCommandHandler:
             else:
                 print("连接管理器未初始化")
             return True
-
+    
         # === 其他系统命令 ===
         elif system_command == 'status':
             print(await self._get_connection_status())
@@ -349,7 +390,7 @@ class ConsoleCommandHandler:
                 group_id=0,
                 websocket=None,
                 is_private=False,
-                from_console=True  # 添加这个标志
+                from_console=True
             )
             
             return result if result else "停止命令已执行"
@@ -405,15 +446,41 @@ class ConsoleCommandHandler:
     async def _handle_qq_command(self, command: str) -> str:
         """通过QQ命令系统处理命令"""
         try:
-            if hasattr(self.bot.qq_server, 'command_handlers'):
-                handler_method = getattr(self.bot.qq_server.command_handlers, f'handle_{command}', None)
-                if handler_method and asyncio.iscoroutinefunction(handler_method):
-                    result = await handler_method()
-                    return result if result else f"命令 '{command}' 已执行"
-                elif handler_method:
-                    result = handler_method()
-                    return result if result else f"命令 '{command}' 已执行"
-            return f"命令 '{command}' 不可用或未实现"
+            if not self.bot.qq_server or not self.bot.qq_server.command_handlers:
+                return "命令系统未初始化"
+                        
+            # 分割命令和参数
+            parts = command.split(maxsplit=1)
+            base_command = parts[0].lower()
+            command_args = parts[1] if len(parts) > 1 else ""
+                        
+            # 查找对应的处理方法
+            handler_method_name = f'handle_{base_command}'
+            handler_method = getattr(self.bot.qq_server.command_handlers, handler_method_name, None)
+            
+            if handler_method:
+                # 准备参数
+                kwargs = {
+                    'user_id': 0,  # 控制台用户ID
+                    'group_id': 0,  # 控制台群组ID
+                    'websocket': None,  # 无WebSocket连接
+                    'is_private': True,  # 作为私聊处理
+                    'from_console': True  # 标记来自控制台
+                }
+                
+                # 如果有命令参数，添加进去
+                if command_args:
+                    kwargs['command_text'] = command_args
+                                
+                if asyncio.iscoroutinefunction(handler_method):
+                    result = await handler_method(**kwargs)
+                else:
+                    result = handler_method(**kwargs)
+                
+                return result if result else f"命令 '{base_command}' 已执行"
+            else:
+                return f"命令 '{base_command}' 不可用或未实现"
+                
         except Exception as e:
             self.logger.error(f"处理QQ命令失败: {e}")
             return f"命令执行失败: {e}"
@@ -517,6 +584,12 @@ class ConsoleCommandHandler:
   #kill            - 强制杀死服务器进程(不保存数据,紧急用)
   #server_status   - 查看服务器进程状态
 
+插件管理命令 (使用 # 前缀):
+  #plugins         - 显示所有已加载插件状态
+  #load_plugin <插件名>  - 加载指定插件
+  #unload_plugin <插件名> - 卸载指定插件
+  #reload_plugin <插件名> - 重新加载指定插件(热重载)
+
 服务器查询命令 (使用 # 前缀):
   #list            - 查看在线玩家列表
   #tps             - 查看服务器TPS(每秒刻数)性能
@@ -543,7 +616,7 @@ Minecraft命令 (无 # 前缀):
 
 
 class MsmpQQBot(ServerEventListener):
-    """MSMP_QQBot主程序"""
+    """MSMP_QQBot 主程序"""
     
     def __init__(self, config_path: str = "config.yml"):
         self.config_path = config_path
@@ -565,6 +638,13 @@ class MsmpQQBot(ServerEventListener):
         # 连接管理器
         self.connection_manager = ConnectionManager(self.logger, cache_ttl=5)
         self.logger.info("连接管理器已初始化")
+        
+        # 初始化插件管理器
+        self.plugin_manager = PluginManager(
+            plugin_dir="plugins",
+            logger=self.logger
+        )
+        self.logger.info("插件管理器已初始化")
         
         self.msmp_client = None
         self.rcon_client = None
@@ -624,7 +704,7 @@ class MsmpQQBot(ServerEventListener):
             )
             self.logger.info("连接管理器已绑定客户端")
             
-            # 启动QQ机器人WebSocket服务器
+            # 启动 QQ 机器人 WebSocket 服务器
             ws_token = self.config_manager.get_websocket_token() if self.config_manager.is_websocket_auth_enabled() else ""
             
             self.qq_server = QQBotWebSocketServer(
@@ -635,11 +715,21 @@ class MsmpQQBot(ServerEventListener):
                 ws_token,
                 config_manager=self.config_manager,
                 rcon_client=self.rcon_client,
-                connection_manager=self.connection_manager
+                connection_manager=self.connection_manager,
+                plugin_manager=self.plugin_manager
             )
             
             await self.qq_server.start()
             self.logger.info("QQ机器人服务器已启动")
+            
+            # 加载所有插件
+            self.logger.info("=" * 60)
+            self.logger.info("正在加载插件...")
+            self.logger.info("=" * 60)
+            await self.plugin_manager.load_plugins()
+            self.logger.info("=" * 60)
+            self.logger.info(f"插件加载完成，共加载 {len(self.plugin_manager.plugins)} 个插件")
+            self.logger.info("=" * 60)
             
             # 启动定时日志归档
             asyncio.create_task(self._periodic_log_archive())
@@ -678,7 +768,7 @@ class MsmpQQBot(ServerEventListener):
                     
                     scheduled_config = self.config_manager.config.get('scheduled_tasks', {})
                     restart_config = scheduled_config.get('auto_restart', {})
-                    restart_msg = restart_config.get('restart_success_message', '服务器已重启，欢迎回来！')
+                    restart_msg = restart_config.get('restart_success_message', 'server restarted')
                     
                     await on_task_notify(task, restart_msg)
             
@@ -703,20 +793,19 @@ class MsmpQQBot(ServerEventListener):
             # 启动定时任务管理器
             self.scheduled_task_manager.start()
             
-            # 注册配置重载回调
+            # 注册配置重新加载回调
             if self.config_manager:
                 async def on_config_reload(old_config, new_config):
+                    """配置重新加载时的回调"""
+                    # 通知插件管理器
+                    await self.plugin_manager.reload_config(old_config, new_config)
+                    self.logger.info("插件配置已更新")
+                    
+                    # 其他配置更新逻辑
                     if self.scheduled_task_manager:
                         self.scheduled_task_manager.reload_tasks_from_config()
                 
                 self.config_manager.register_reload_callback(on_config_reload)
-            
-            # 初始化控制台处理器
-            self.console_handler = ConsoleCommandHandler(self, self.logger)
-            self.logger.info("控制台命令处理器已初始化")
-            
-            # 启动控制台输入处理
-            asyncio.create_task(self.console_handler.handle_console_input())
             
             self.running = True
             self.logger.info("MSMP_QQBot 服务启动成功")
@@ -733,7 +822,7 @@ class MsmpQQBot(ServerEventListener):
                 # 每 24 小时执行一次
                 await asyncio.sleep(86400)
                 
-                self.logger.info("开始定期日志归档...")
+                self.logger.info("开始定时日志归档...")
                 result = await self.log_manager.archive_logs()
                 
                 if result:
@@ -759,8 +848,15 @@ class MsmpQQBot(ServerEventListener):
 
     async def stop(self):
         """停止服务"""
-        self.logger.info("正在停止MSMP_QQBot服务...")
+        self.logger.info("正在停止 MSMP_QQBot 服务...")
         self.running = False
+        
+        # 卸载所有插件
+        self.logger.info("=" * 60)
+        self.logger.info("正在卸载插件...")
+        await self.plugin_manager.unload_plugins()
+        self.logger.info("=" * 60)
+        self.logger.info("所有插件已卸载")
         
         # 停止定时任务管理器
         if hasattr(self, 'scheduled_task_manager') and self.scheduled_task_manager:
@@ -861,12 +957,11 @@ class MsmpQQBot(ServerEventListener):
         finally:
             await self.stop()
 
-
 def main():
     """主函数"""
-    print("="*50)
+    print("=" * 50)
     print("  MSMP_QQBot - Minecraft Server QQ Bridge")
-    print("="*50)
+    print("=" * 50)
     
     bridge = MsmpQQBot()
     loop = None
@@ -883,7 +978,28 @@ def main():
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
         
-        loop.run_until_complete(bridge.run_async())
+        # 启动主服务
+        loop.run_until_complete(bridge.start())
+        
+        # 启动控制台命令处理器（在主服务启动后）
+        console_handler = ConsoleCommandHandler(bridge, bridge.logger)
+        console_task = asyncio.ensure_future(console_handler.handle_console_input())
+        
+        # 主循环
+        try:
+            while bridge.running:
+                loop.run_until_complete(asyncio.sleep(1))
+                
+        except KeyboardInterrupt:
+            print("\n收到中断信号，正在停止...")
+        finally:
+            # 停止控制台处理器
+            console_handler.stop()
+            if not console_task.done():
+                console_task.cancel()
+            
+            # 停止主服务
+            loop.run_until_complete(bridge.stop())
         
     except Exception as e:
         logging.error(f"程序运行出错: {e}", exc_info=True)

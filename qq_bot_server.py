@@ -23,7 +23,22 @@ class QQBotWebSocketServer:
     """
     
     def __init__(self, port: int, allowed_groups: List[int], msmp_client, logger: logging.Logger, 
-                 access_token: str = "", config_manager=None, rcon_client=None, connection_manager=None):
+             access_token: str = "", config_manager=None, rcon_client=None, connection_manager=None,
+             plugin_manager=None):
+        """
+        初始化 QQBotWebSocketServer
+        
+        Args:
+            port: WebSocket 监听端口
+            allowed_groups: 允许的 QQ 群列表
+            msmp_client: MSMP 客户端
+            logger: 日志对象
+            access_token: WebSocket 访问令牌
+            config_manager: 配置管理器
+            rcon_client: RCON 客户端
+            connection_manager: 连接管理器
+            plugin_manager: 插件管理器（新增）
+        """
         self.port = port
         self.allowed_groups = allowed_groups
         self.msmp_client = msmp_client
@@ -32,6 +47,7 @@ class QQBotWebSocketServer:
         self.access_token = access_token
         self.config_manager = config_manager
         self.connection_manager = connection_manager
+        self.plugin_manager = plugin_manager
         
         self.current_connection = None
         self.server = None
@@ -75,10 +91,10 @@ class QQBotWebSocketServer:
                 self.logger.error(f"初始化自定义指令处理器失败: {e}")
                 self.custom_command_handler = None
 
-        # 注册配置重载回调
+        # 注册配置重新加载回调
         if self.config_manager:
             self.config_manager.register_reload_callback(self._on_config_reload)
-            self.logger.info("已注册配置重载回调")
+            self.logger.info("已注册配置重新加载回调")
     
     async def _on_config_reload(self, old_config: Dict, new_config: Dict):
         """配置重载时的回调函数
@@ -334,7 +350,41 @@ class QQBotWebSocketServer:
             usage='listeners',
             cooldown=5
         )
-        
+
+        # 插件管理命令
+        self.command_handler.register_command(
+            names=['plugins', '插件', '/plugins'],
+            handler=self.command_handlers.handle_plugins,
+            admin_only=False,
+            description='显示插件系统状态',
+            usage='plugins',
+            command_key='plugins'
+        )
+
+        self.command_handler.register_command(
+            names=['reload_plugin', '重载插件', '/reload_plugin'],
+            handler=self.command_handlers.handle_reload_plugin,
+            admin_only=True,
+            description='重新加载指定插件',
+            usage='reload_plugin <插件名称>'
+        )
+
+        self.command_handler.register_command(
+            names=['unload_plugin', '卸载插件', '/unload_plugin'],
+            handler=self.command_handlers.handle_unload_plugin,
+            admin_only=True,
+            description='卸载指定插件',
+            usage='unload_plugin <插件名称>'
+        )
+
+        self.command_handler.register_command(
+            names=['load_plugin', '加载插件', '/load_plugin'],
+            handler=self.command_handlers.handle_load_plugin,
+            admin_only=True,
+            description='加载指定插件',
+            usage='load_plugin <插件名称>'
+        )
+            
         self.logger.info(f"已注册 {len(self.command_handler.list_commands())} 个命令")
     
     # ============ 日志相关方法 ============
@@ -590,7 +640,7 @@ class QQBotWebSocketServer:
             
             if group_id not in self.allowed_groups:
                 return
-            
+        
             # ① 先检查自定义指令（优先级最高）
             if self.custom_command_handler:
                 try:
@@ -641,19 +691,36 @@ class QQBotWebSocketServer:
             # ③ 最后检查普通命令（help, list, tps等）
             if self.command_handler:
                 try:
-                    result = await asyncio.wait_for(
-                        self.command_handler.handle_command(
-                            command_text=raw_message,
-                            user_id=user_id,
-                            group_id=group_id,
-                            websocket=websocket,
-                            msmp_client=self.msmp_client
-                        ),
-                        timeout=30.0
-                    )
+                    # 提取命令和参数
+                    parts = raw_message.split(maxsplit=1)  # 只分割一次，保留参数
+                    base_command = parts[0].lower() if parts else ""
                     
-                    if result:
-                        await self.send_group_message(websocket, group_id, result)
+                    # 检查是否是注册的命令
+                    if base_command and base_command in self.command_handler.commands:
+                        # 如果有参数，传递给命令处理器
+                        command_args = parts[1] if len(parts) > 1 else ""
+                        
+                        result = await asyncio.wait_for(
+                            self.command_handler.handle_command(
+                                command_text=base_command,
+                                command_args=command_args,
+                                user_id=user_id,
+                                group_id=group_id,
+                                websocket=websocket,
+                                msmp_client=self.msmp_client,
+                                config_manager=self.config_manager, 
+                                rcon_client=self.rcon_client,
+                                plugin_manager=self.plugin_manager,
+                                connection_manager=self.connection_manager
+                            ),
+                            timeout=30.0
+                        )
+                        
+                        if result:
+                            await self.send_group_message(websocket, group_id, result)
+                    else:
+                        # 不是注册的命令，静默忽略
+                        pass
                         
                 except asyncio.TimeoutError:
                     await self.send_group_message(websocket, group_id, "命令执行超时,请稍后重试")

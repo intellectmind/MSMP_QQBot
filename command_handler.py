@@ -82,32 +82,37 @@ class CommandHandler:
                        command_text: str,
                        user_id: int,
                        group_id: int,
+                       command_args: str = "",
                        **kwargs) -> Optional[str]:
         """处理命令"""
         command_text = command_text.strip().lower()
+        
+        self.logger.debug(f"处理命令: '{command_text}', 参数: '{command_args}', 用户: {user_id}")
         
         # 查找命令
         command = self.commands.get(command_text)
         
         if not command:
+            self.logger.debug(f"未找到命令: '{command_text}'")
             return None
+        
+        self.logger.debug(f"找到命令: {command.names[0]}")
         
         # 检查命令是否可用
         is_admin = self.config_manager.is_admin(user_id)
         
         if command.admin_only:
-            # 管理员命令权限检查 - 管理员不受限制
+            # 管理员命令权限检查
             if not is_admin and not self.config_manager.is_admin_command_enabled(command.names[0]):
                 return f"命令 {command.names[0]} 已被禁用"
         else:
-            # 基础命令权限检查（管理员不受限制）
+            # 基础命令权限检查
             if not is_admin and command.command_key:
                 if not self.config_manager.is_command_enabled(command.command_key):
                     return None  # 命令被禁用,静默返回
         
         # 检查管理员权限
         if command.admin_only and not is_admin:
-            # 如果非管理员要使用管理员命令，需要检查是否开放
             if not self.config_manager.is_admin_command_enabled(command.names[0]):
                 return "权限不足:此命令仅限管理员使用"
         
@@ -119,21 +124,17 @@ class CommandHandler:
         )
         
         if not can_use:
-            return f"命令冷却中,请等待 {remaining} 秒'"
+            return f"命令冷却中,请等待 {remaining} 秒"
         
-        # 执行命令
+        # 执行命令 - 传递参数
         try:
-            # 根据命令类型设置不同的超时时间
-            if command.admin_only and command.names[0] in ['start', 'stop', 'log', 'reconnect']:
-                timeout = 60.0  # 管理命令给更长时间
-            else:
-                timeout = 30.0  # 普通命令30秒
+            timeout = 60.0 if command.admin_only and command.names[0] in ['start', 'stop', 'log', 'reconnect'] else 30.0
             
             result = await asyncio.wait_for(
                 command.handler(
                     user_id=user_id,
                     group_id=group_id,
-                    command_text=command_text,
+                    command_text=command_args,  # 传递参数给处理器
                     **kwargs
                 ),
                 timeout=timeout
@@ -1467,3 +1468,107 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"执行network命令失败: {e}", exc_info=True)
             return f"获取网络信息失败: {e}"
+
+    async def handle_plugins(self, **kwargs) -> str:
+        """处理plugins命令 - 显示插件状态"""
+        try:
+            if not self.qq_server.plugin_manager:
+                return "插件管理器未初始化"
+            
+            return self.qq_server.plugin_manager.get_plugin_status()
+            
+        except Exception as e:
+            self.logger.error(f"执行plugins命令失败: {e}", exc_info=True)
+            return f"获取插件状态失败: {e}"
+
+    async def handle_reload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
+        """处理reload_plugin命令(管理员) - 重新加载插件"""
+        try:
+            if not self.config_manager.is_admin(user_id):
+                return "权限不足: 此命令仅限管理员使用"
+            
+            if not command_text:
+                return "用法: #reload_plugin <插件名称>"
+            
+            plugin_name = command_text.strip()
+            
+            if not self.qq_server.plugin_manager:
+                return "插件管理器未初始化"
+            
+            success = await self.qq_server.plugin_manager.reload_plugin(plugin_name)
+            
+            if success:
+                return f"插件 '{plugin_name}' 重载成功"
+            else:
+                return f"插件 '{plugin_name}' 重载失败"
+                
+        except Exception as e:
+            self.logger.error(f"执行reload_plugin命令失败: {e}", exc_info=True)
+            return f"重载插件失败: {e}"
+
+    async def handle_unload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
+        """处理unload_plugin命令(管理员) - 卸载插件"""
+        try:
+            if not self.config_manager.is_admin(user_id):
+                return "权限不足: 此命令仅限管理员使用"
+            
+            if not command_text:
+                return "用法: #unload_plugin <插件名称>"
+            
+            plugin_name = command_text.strip()
+            
+            if not self.qq_server.plugin_manager:
+                return "插件管理器未初始化"
+            
+            success = await self.qq_server.plugin_manager.unload_plugin(plugin_name)
+            
+            if success:
+                return f"插件 '{plugin_name}' 卸载成功"
+            else:
+                return f"插件 '{plugin_name}' 卸载失败"
+                
+        except Exception as e:
+            self.logger.error(f"执行unload_plugin命令失败: {e}", exc_info=True)
+            return f"卸载插件失败: {e}"
+
+    async def handle_load_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
+        """处理load_plugin命令(管理员) - 加载插件"""
+        try:
+            # 控制台调用时跳过权限检查
+            from_console = kwargs.get('from_console', False)
+            if not from_console and not self.config_manager.is_admin(user_id):
+                return "权限不足: 此命令仅限管理员使用"
+            
+            if not command_text:
+                return "用法: #load_plugin <插件名称>"
+            
+            plugin_name = command_text.strip()
+            
+            # 移除可能的.py后缀
+            if plugin_name.endswith('.py'):
+                plugin_name = plugin_name[:-3]
+            
+            if not self.qq_server.plugin_manager:
+                return "插件管理器未初始化"
+                        
+            # 检查插件是否已经加载
+            existing_plugin = self.qq_server.plugin_manager.get_plugin(plugin_name)
+            if existing_plugin:
+                return f"插件 '{plugin_name}' 已经加载"
+            
+            # 尝试加载插件
+            success = await self.qq_server.plugin_manager.load_plugin(plugin_name)
+            
+            if success:
+                # 再次确认插件确实加载成功
+                loaded_plugin = self.qq_server.plugin_manager.get_plugin(plugin_name)
+                if loaded_plugin:
+                    return f"插件 '{plugin_name}' 加载成功"
+                else:
+                    return f"插件 '{plugin_name}' 加载异常，请检查插件代码"
+            else:
+                return f"插件 '{plugin_name}' 加载失败，请检查插件文件是否存在"
+                
+        except Exception as e:
+            self.logger.error(f"执行load_plugin命令失败: {e}", exc_info=True)
+            return f"加载插件失败: {e}"

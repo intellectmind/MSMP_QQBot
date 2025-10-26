@@ -171,10 +171,10 @@ class CommandHandler:
                     if is_admin or (command.command_key and self.config_manager.is_command_enabled(command.command_key)):
                         basic_commands.append(command)
         
-        lines = ["MSMP_QQBot 命令帮助", "══════════════"]
+        lines = ["MSMP_QQBot 命令帮助", "══════════"]
         
         if basic_commands:
-            lines.append("\n基础命令:")
+            lines.append("\n【基础命令】")
             for cmd in basic_commands:
                 aliases = " / ".join(cmd.names[:3])
                 lines.append(f"• {aliases}")
@@ -185,7 +185,7 @@ class CommandHandler:
         
         # 对非管理员显示开放的管理员命令
         if not is_admin and enabled_admin_commands:
-            lines.append("\n开放的管理员命令:")
+            lines.append("\n【开放的管理员命令】")
             for cmd in enabled_admin_commands:
                 aliases = " / ".join(cmd.names[:3])
                 lines.append(f"• {aliases}")
@@ -193,39 +193,89 @@ class CommandHandler:
                     lines.append(f"  {cmd.description}")
         
         if admin_commands:
-            lines.append("\n管理员专属命令:")
+            lines.append("\n【管理员专属命令】")
             for cmd in admin_commands:
                 aliases = " / ".join(cmd.names[:3])
                 lines.append(f"• {aliases}")
                 if cmd.description:
                     lines.append(f"  {cmd.description}")
             
-            lines.append("\n直接命令执行:")
+            lines.append("\n【直接命令执行】")
             lines.append("• !<命令>")
             lines.append("  使用 ! 前缀直接执行服务器命令")
             lines.append("  示例: !say Hello 或 !give @a diamond")
         
-        # 显示禁用命令提示（仅对管理员显示）
-        if is_admin:
-            disabled_commands = []
+        # ========== 添加自定义指令信息 ==========
+        if self.config_manager.is_custom_commands_enabled():
+            try:
+                custom_rules = self.config_manager.get_custom_command_rules()
+                
+                if custom_rules:
+                    # 按权限过滤自定义指令
+                    user_custom_commands = []
+                    for rule in custom_rules:
+                        if not rule.get('enabled', True):
+                            continue
+                        
+                        admin_only = rule.get('admin_only', False)
+                        if admin_only and not is_admin:
+                            continue
+                        
+                        user_custom_commands.append(rule)
+                    
+                    if user_custom_commands:
+                        lines.append("\n【自定义指令】")
+                        lines.append(f"已启用 {len(user_custom_commands)} 个自定义指令:")
+                        
+                        for rule in user_custom_commands:
+                            rule_name = rule.get('name', 'unknown')
+                            description = rule.get('description', '')
+                            pattern = rule.get('pattern', '')
+                            admin_tag = " [仅管理员]" if rule.get('admin_only', False) else ""
+                            
+                            lines.append(f"• {rule_name}{admin_tag}")
+                            if description:
+                                lines.append(f"  {description}")
+                            if pattern:
+                                # 简化显示触发模式
+                                pattern_preview = pattern[:40]
+                                if len(pattern) > 40:
+                                    pattern_preview += "..."
+                                lines.append(f"  触发: {pattern_preview}")
             
-            for cmd_key, enabled in self.config_manager.get_enabled_commands().items():
-                if not enabled:
-                    disabled_commands.append(cmd_key)
+            except Exception as e:
+                pass
+        
+        # ========== 添加自定义消息监听规则信息 ==========
+        if self.config_manager.is_custom_listeners_enabled():
+            try:
+                listener_rules = self.config_manager.get_custom_listener_rules()
+                
+                if listener_rules:
+                    enabled_listeners = [r for r in listener_rules if r.get('enabled', True)]
+                    
+                    if enabled_listeners:
+                        lines.append("\n【服务器消息监听】")
+                        lines.append(f"已启用 {len(enabled_listeners)} 个监听规则")
+                        
+                        # 显示前几个规则的名称
+                        listener_names = [r.get('name', 'unknown') for r in enabled_listeners]
+                        for name in listener_names:
+                            lines.append(f"• {name}")
+                        
+                        if is_admin:
+                            lines.append(f"使用 listeners 查看完整监听规则详情")
             
-            for cmd_key, enabled in self.config_manager.get_enabled_admin_commands().items():
-                if not enabled:
-                    disabled_commands.append(f"{cmd_key}(非管理员)")
-            
-            if disabled_commands:
-                lines.append(f"\n已禁用命令: {', '.join(disabled_commands)}")
+            except Exception as e:
+                pass
         
         # 添加使用提示
         if not is_admin:
             lines.append(f"\n提示: 当前有 {len(enabled_admin_commands)} 个管理员命令对您开放")
             lines.append("   如需更多权限，请联系管理员")
         else:
-            lines.append(f"\n您是管理员，可以使用所有 {len(admin_commands)} 个管理员命令")
+            lines.append(f"\n您是管理员，可以使用所有命令")
+            lines.append("   使用 #listeners 查看自定义监听规则详情")
         
         return "\n".join(lines)
     
@@ -985,22 +1035,16 @@ class CommandHandlers:
             if not os.path.exists(start_script):
                 return f"启动脚本不存在: {start_script}"
             
-            if websocket and not websocket.closed:
-                if is_private:
-                    await self.qq_server.send_private_message(websocket, user_id, "正在启动服务器...")
-                else:
-                    await self.qq_server.send_group_message(websocket, group_id, "正在启动服务器...")
-            
             await self.qq_server._start_server_process(websocket, group_id)
             
             connection_info = []
             if self.config_manager.is_msmp_enabled():
-                connection_info.append("MSMP管理协议")
+                connection_info.append("MSMP")
             if self.config_manager.is_rcon_enabled():
-                connection_info.append("RCON远程控制")
+                connection_info.append("RCON")
             
             if connection_info and websocket and not websocket.closed:
-                info_msg = f"服务器启动后，将自动尝试连接: {', '.join(connection_info)}"
+                info_msg = f"正在启动服务器...启动后，将自动尝试连接: {', '.join(connection_info)}"
                 if is_private:
                     await self.qq_server.send_private_message(websocket, user_id, info_msg)
                 else:
@@ -1066,20 +1110,47 @@ class CommandHandlers:
             
             status = "运行中" if server_running else "已停止"
             lines = [f"最近 {len(recent_logs)} 条服务器日志 (服务器{status}):"]
-            lines.append("■■■■■■■■■■■■■■")
+            lines.append("▬" * 20)
             
-            for log in recent_logs:
-                if len(log) > 100:
-                    log = log[:100] + "..."
-                lines.append(log)
+            # 不截断日志，完整显示
+            for i, log in enumerate(recent_logs, 1):
+                lines.append(f"{i}. {log}")
             
-            lines.append("■■■■■■■■■■■■■■")
+            lines.append("▬" * 20)
             if server_running:
                 lines.append("提示: 日志实时更新，再次发送 log 查看最新日志")
             else:
                 lines.append("提示: 服务器已停止，日志不再更新")
             
-            return "\n".join(lines)
+            # 分页发送（避免消息过长）
+            message = "\n".join(lines)
+            
+            # 如果消息过长，分多条发送
+            max_length = self.config_manager.get_max_message_length() if self.config_manager else 2500
+            
+            if len(message) > max_length:
+                # 分页显示
+                pages = []
+                current_page = []
+                current_length = 0
+                
+                for line in lines:
+                    line_length = len(line) + 1  # +1 for newline
+                    if current_length + line_length > max_length and current_page:
+                        pages.append("\n".join(current_page))
+                        current_page = [line]
+                        current_length = line_length
+                    else:
+                        current_page.append(line)
+                        current_length += line_length
+                
+                if current_page:
+                    pages.append("\n".join(current_page))
+                
+                # 返回第一页，其他页面需要通过多次调用显示
+                return pages[0] + f"\n\n[第 1/{len(pages)} 页，共 {len(recent_logs)} 条日志]"
+            else:
+                return message
             
         except Exception as e:
             self.logger.error(f"执行log命令失败: {e}", exc_info=True)
@@ -1235,7 +1306,7 @@ class CommandHandlers:
             self.qq_server.server_process = None
             self.qq_server._close_log_file()
             
-            return "服务器进程已强制中止，所有连接和端口已彻底清理"
+            return "服务器进程已强制中止"
             
         except Exception as e:
             self.logger.error(f"执行kill命令失败: {e}", exc_info=True)

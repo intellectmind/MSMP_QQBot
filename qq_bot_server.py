@@ -14,6 +14,7 @@ from command_handler import CommandHandler, CommandHandlers
 from rcon_client import RCONClient
 from logging.handlers import RotatingFileHandler
 from custom_listener import CustomMessageListener
+from custom_command_handler import CustomCommandHandler
 
 class QQBotWebSocketServer:
     """
@@ -65,6 +66,15 @@ class QQBotWebSocketServer:
                 self.logger.error(f"初始化自定义消息监听器失败: {e}")
                 self.custom_listener = None
         
+        # 初始化自定义指令处理器
+        if self.config_manager:
+            try:
+                self.custom_command_handler = CustomCommandHandler(self.config_manager, self.logger)
+                self.logger.info("自定义指令处理器已初始化")
+            except Exception as e:
+                self.logger.error(f"初始化自定义指令处理器失败: {e}")
+                self.custom_command_handler = None
+
         # 注册配置重载回调
         if self.config_manager:
             self.config_manager.register_reload_callback(self._on_config_reload)
@@ -581,6 +591,24 @@ class QQBotWebSocketServer:
             if group_id not in self.allowed_groups:
                 return
             
+            # ① 先检查自定义指令（优先级最高）
+            if self.custom_command_handler:
+                try:
+                    handled = await self.custom_command_handler.process_group_message(
+                        message=raw_message,
+                        user_id=user_id,
+                        group_id=group_id,
+                        websocket=websocket,
+                        server_executor=self._execute_server_command
+                    )
+                    
+                    if handled:
+                        return  # 已处理自定义指令，不继续处理其他命令
+                        
+                except Exception as e:
+                    self.logger.error(f"处理自定义指令失败: {e}", exc_info=True)
+            
+            # ② 再检查 ! 开头的服务器命令
             if raw_message.startswith('!'):
                 if not self.config_manager.is_admin(user_id):
                     return
@@ -610,6 +638,7 @@ class QQBotWebSocketServer:
                 
                 return
             
+            # ③ 最后检查普通命令（help, list, tps等）
             if self.command_handler:
                 try:
                     result = await asyncio.wait_for(
@@ -629,7 +658,7 @@ class QQBotWebSocketServer:
                 except asyncio.TimeoutError:
                     await self.send_group_message(websocket, group_id, "命令执行超时,请稍后重试")
                     self.logger.warning(f"命令执行超时: {raw_message}")
-                except Exception as e:
+                except Exception as e:  
                     self.logger.error(f"命令处理失败: {e}", exc_info=True)
                     await self.send_group_message(websocket, group_id, f"命令执行出错: {str(e)}")
         
@@ -1269,12 +1298,6 @@ class QQBotWebSocketServer:
                 self.server_process = None
                 self._close_log_file()
                 return
-            
-            if websocket and not websocket.closed:
-                if group_id > 0:
-                    await self.send_group_message(websocket, group_id, "服务器启动命令已执行")
-                elif private_user_id:
-                    await self.send_private_message(websocket, private_user_id, "服务器启动命令已执行")
             
             # 重置停止标志
             self.server_stopping = False

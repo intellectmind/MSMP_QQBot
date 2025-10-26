@@ -145,7 +145,7 @@ class ConfigManager:
                 'groups': [123456789],
                 'admins': [123456789],
                 'welcome_new_members': False,
-                'welcome_message': '欢迎新成员加入!输入 help 查看可用命令'
+                'welcome_message': '欢迎新成员加入！输入 help 查看可用命令'
             },
             'server': {
                 'start_script': '',
@@ -200,35 +200,39 @@ class ConfigManager:
                 'max_server_logs': 100,
             },
             'scheduled_tasks': {
-            'enabled': False,
-            'auto_start': {
                 'enabled': False,
-                'times': ['08:00', '18:00'],
-                'weekdays': [0, 1, 2, 3, 4, 5, 6],
-                'pre_notify_seconds': 300,
-                'notify_message': '服务器将在 {countdown} 秒后启动，请做好准备'
+                'auto_start': {
+                    'enabled': False,
+                    'times': ['08:00', '18:00'],
+                    'weekdays': [0, 1, 2, 3, 4, 5, 6],
+                    'pre_notify_seconds': 300,
+                    'notify_message': '服务器将在 {countdown} 秒后启动，请做好准备'
+                },
+                'auto_stop': {
+                    'enabled': False,
+                    'times': ['12:00', '23:59'],
+                    'weekdays': [0, 1, 2, 3, 4, 5, 6],
+                    'warning_before_seconds': 600,
+                    'first_warning': '服务器将在 {countdown} 秒后关闭，请保存游戏',
+                    'second_warning': '服务器即将在 1 分钟后关闭',
+                    'immediate_message': '服务器正在关闭',
+                },
+                'auto_restart': {
+                    'enabled': False,
+                    'times': ['04:00', '16:00'],
+                    'weekdays': [0, 1, 2, 3, 4, 5, 6],
+                    'warning_before_seconds': 600,
+                    'first_warning': '服务器将在 {countdown} 秒后重启，请保存游戏',
+                    'second_warning': '服务器即将在 1 分钟后重启',
+                    'immediate_message': '服务器正在重启',
+                    'wait_before_startup': 10,
+                    'restart_success_message': '服务器已重启，欢迎回来！'
+                }
             },
-            'auto_stop': {
+            'custom_commands': {
                 'enabled': False,
-                'times': ['12:00', '23:59'],
-                'weekdays': [0, 1, 2, 3, 4, 5, 6],
-                'warning_before_seconds': 600,
-                'first_warning': '服务器将在 {countdown} 秒后关闭，请保存游戏',
-                'second_warning': '服务器即将在 1 分钟后关闭',
-                'immediate_message': '服务器正在关闭',
+                'rules': []
             },
-            'auto_restart': {
-                'enabled': False,
-                'times': ['04:00', '16:00'],
-                'weekdays': [0, 1, 2, 3, 4, 5, 6],
-                'warning_before_seconds': 600,
-                'first_warning': '服务器将在 {countdown} 秒后重启，请保存游戏',
-                'second_warning': '服务器即将在 1 分钟后重启',
-                'immediate_message': '服务器正在重启',
-                'wait_before_startup': 10,
-                'restart_success_message': '服务器已重启，欢迎回来！'
-            }
-        },
             'custom_listeners': {
                 'enabled': False,
                 'rules': []
@@ -458,7 +462,7 @@ class ConfigManager:
     
     # ============ MSMP配置 ============
     def is_msmp_enabled(self) -> bool:
-        return self.config.get('msmp', {}).get('enabled', True)
+        return self.config.get('msmp', {}).get('enabled', False)
     
     def get_msmp_host(self) -> str:
         return self.config.get('msmp', {}).get('host', 'localhost')
@@ -506,7 +510,7 @@ class ConfigManager:
         return self.config.get('qq', {}).get('welcome_new_members', False)
     
     def get_welcome_message(self) -> str:
-        return self.config.get('qq', {}).get('welcome_message', '欢迎新成员加入!输入 help 查看可用命令')
+        return self.config.get('qq', {}).get('welcome_message', '欢迎新成员加入！输入 help 查看可用命令')
     
     def is_log_messages_enabled(self) -> bool:
         return self.config.get('notifications', {}).get('log_messages', False)
@@ -545,7 +549,7 @@ class ConfigManager:
     def is_admin_command_enabled(self, command_name: str) -> bool:
         """检查管理员命令是否启用（管理员不受此限制）"""
         enabled_admin_commands = self.config.get('commands', {}).get('enabled_admin_commands', {})
-        return enabled_admin_commands.get(command_name, True)
+        return enabled_admin_commands.get(command_name, False)
 
     def can_use_command(self, user_id: int, command_name: str, is_admin_command: bool = False) -> bool:
         """检查用户是否可以使用命令
@@ -604,7 +608,7 @@ class ConfigManager:
         return self.config.get('notifications', {}).get('server_events', True)
     
     def is_player_event_notify_enabled(self) -> bool:
-        return self.config.get('notifications', {}).get('player_events', True)
+        return self.config.get('notifications', {}).get('player_events', False)
     
     # ============ 区块监控配置 ============
     def get_chunk_monitor_config(self) -> Dict[str, bool]:
@@ -634,11 +638,15 @@ class ConfigManager:
         return self.config.get('advanced', {}).get('command_cooldown', 3)
     
     def get_max_message_length(self) -> int:
-        return self.config.get('advanced', {}).get('max_message_length', 500)
+        return self.config.get('advanced', {}).get('max_message_length', 2500)
     
     def get_max_server_logs(self) -> int:
         """获取最大服务器日志行数"""
         return self.config.get('advanced', {}).get('max_server_logs', 100)
+    
+    def get_player_list_cache_ttl(self) -> int:
+        """获取玩家列表缓存时间（秒）"""
+        return self.config.get('advanced', {}).get('player_list_cache_ttl', 5)
     
     # ============ 自定义监听器配置 ============
     def is_custom_listeners_enabled(self) -> bool:
@@ -689,9 +697,108 @@ class ConfigManager:
             self.config['custom_listeners']['enabled'] = False
         self.save_config()
     
+    # ============ 自定义命令配置 ============
+    def is_custom_commands_enabled(self) -> bool:
+        return self.config.get('custom_commands', {}).get('enabled', False)
+    
+    def get_custom_command_rules(self) -> List[Dict]:
+        return self.config.get('custom_commands', {}).get('rules', [])
+    
+    def get_custom_command_rule(self, rule_name: str) -> Optional[Dict]:
+        rules = self.get_custom_command_rules()
+        for rule in rules:
+            if rule.get('name') == rule_name:
+                return rule
+        return None
+    
+    def add_custom_command_rule(self, rule: Dict):
+        if 'custom_commands' not in self.config:
+            self.config['custom_commands'] = {'enabled': False, 'rules': []}
+        
+        if 'rules' not in self.config['custom_commands']:
+            self.config['custom_commands']['rules'] = []
+        
+        self.config['custom_commands']['rules'].append(rule)
+        self.save_config()
+    
+    def remove_custom_command_rule(self, rule_name: str) -> bool:
+        rules = self.get_custom_command_rules()
+        
+        for i, rule in enumerate(rules):
+            if rule.get('name') == rule_name:
+                rules.pop(i)
+                self.save_config()
+                return True
+        
+        return False
+    
+    def enable_custom_commands(self):
+        if 'custom_commands' not in self.config:
+            self.config['custom_commands'] = {'enabled': True, 'rules': []}
+        else:
+            self.config['custom_commands']['enabled'] = True
+        self.save_config()
+    
+    def disable_custom_commands(self):
+        if 'custom_commands' not in self.config:
+            self.config['custom_commands'] = {'enabled': False, 'rules': []}
+        else:
+            self.config['custom_commands']['enabled'] = False
+        self.save_config()
+    
+    # ============ 定时任务配置 ============
+    def is_scheduled_tasks_enabled(self) -> bool:
+        return self.config.get('scheduled_tasks', {}).get('enabled', False)
+    
+    def get_auto_start_config(self) -> Dict:
+        return self.config.get('scheduled_tasks', {}).get('auto_start', {
+            'enabled': False,
+            'times': [],
+            'weekdays': [],
+            'pre_notify_seconds': 300,
+            'notify_message': '服务器将在 {countdown} 秒后启动，请做好准备'
+        })
+    
+    def get_auto_stop_config(self) -> Dict:
+        return self.config.get('scheduled_tasks', {}).get('auto_stop', {
+            'enabled': False,
+            'times': [],
+            'weekdays': [],
+            'warning_before_seconds': 600,
+            'first_warning': '服务器将在 {countdown} 秒后关闭，请保存游戏',
+            'second_warning': '服务器即将在 1 分钟后关闭',
+            'immediate_message': '服务器正在关闭'
+        })
+    
+    def get_auto_restart_config(self) -> Dict:
+        return self.config.get('scheduled_tasks', {}).get('auto_restart', {
+            'enabled': False,
+            'times': [],
+            'weekdays': [],
+            'warning_before_seconds': 600,
+            'first_warning': '服务器将在 {countdown} 秒后重启，请保存游戏',
+            'second_warning': '服务器即将在 1 分钟后重启',
+            'immediate_message': '服务器正在重启',
+            'wait_before_startup': 10,
+            'restart_success_message': '服务器已重启，欢迎回来！'
+        })
+    
+    def is_auto_start_enabled(self) -> bool:
+        return self.get_auto_start_config().get('enabled', False)
+    
+    def is_auto_stop_enabled(self) -> bool:
+        return self.get_auto_stop_config().get('enabled', False)
+    
+    def is_auto_restart_enabled(self) -> bool:
+        return self.get_auto_restart_config().get('enabled', False)
+    
     # ============ 其他配置 ============
     def is_debug_mode(self) -> bool:
         return self.config.get('debug', False)
+    
+    def set_debug_mode(self, enabled: bool):
+        self.config['debug'] = enabled
+        self.save_config()
     
     def to_dict(self) -> Dict:
         """获取配置字典(隐藏敏感信息)"""
@@ -703,3 +810,48 @@ class ConfigManager:
         if 'websocket' in safe_config and 'token' in safe_config['websocket']:
             safe_config['websocket']['token'] = '***' if safe_config['websocket']['token'] else ''
         return safe_config
+    
+    def get_config_status(self) -> str:
+        """获取配置状态信息"""
+        lines = ["=" * 60, "配置状态信息", "=" * 60]
+        
+        lines.append("\n【连接配置】")
+        lines.append(f"  MSMP: {'启用' if self.is_msmp_enabled() else '禁用'}")
+        if self.is_msmp_enabled():
+            lines.append(f"    - 地址: {self.get_msmp_host()}:{self.get_msmp_port()}")
+        
+        lines.append(f"  RCON: {'启用' if self.is_rcon_enabled() else '禁用'}")
+        if self.is_rcon_enabled():
+            lines.append(f"    - 地址: {self.get_rcon_host()}:{self.get_rcon_port()}")
+        
+        lines.append(f"  WebSocket: 端口 {self.get_ws_port()}")
+        if self.is_websocket_auth_enabled():
+            lines.append(f"    - 认证: 已启用")
+        
+        lines.append("\n【QQ配置】")
+        lines.append(f"  群号数: {len(self.get_qq_groups())}")
+        lines.append(f"  管理员数: {len(self.get_qq_admins())}")
+        
+        lines.append("\n【命令配置】")
+        lines.append(f"  基础命令启用: {sum(1 for v in self.get_enabled_commands().values() if v)}/{len(self.get_enabled_commands())}")
+        lines.append(f"  管理员命令启用: {sum(1 for v in self.get_enabled_admin_commands().values() if v)}/{len(self.get_enabled_admin_commands())}")
+        
+        lines.append("\n【功能配置】")
+        lines.append(f"  自定义命令: {'启用' if self.is_custom_commands_enabled() else '禁用'}")
+        lines.append(f"  自定义监听: {'启用' if self.is_custom_listeners_enabled() else '禁用'}")
+        lines.append(f"  定时任务: {'启用' if self.is_scheduled_tasks_enabled() else '禁用'}")
+        lines.append(f"  调试模式: {'启用' if self.is_debug_mode() else '禁用'}")
+        
+        lines.append("\n【服务器配置】")
+        lines.append(f"  启动脚本: {self.get_server_start_script() if self.get_server_start_script() else '未配置'}")
+        lines.append(f"  启动超时: {self.get_server_startup_timeout()}秒")
+        
+        lines.append("\n【高级配置】")
+        lines.append(f"  重连间隔: {self.get_reconnect_interval()}秒")
+        lines.append(f"  心跳间隔: {self.get_heartbeat_interval()}秒")
+        lines.append(f"  命令冷却: {self.get_command_cooldown()}秒")
+        lines.append(f"  最大消息长度: {self.get_max_message_length()}字符")
+        lines.append(f"  最大日志行数: {self.get_max_server_logs()}行")
+        
+        lines.append("=" * 60)
+        return "\n".join(lines)

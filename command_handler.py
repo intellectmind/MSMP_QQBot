@@ -1551,8 +1551,16 @@ class CommandHandlers:
                     if handler and hasattr(handler, '__self__'):
                         if handler.__self__ == plugin:
                             names = cmd_info.get('names', [])
+                            description = cmd_info.get('description', '')
+                            admin_only = cmd_info.get('admin_only', False)
+                            
                             if names:
-                                plugin_cmds.append(f"  • {' / '.join(names)}")
+                                cmd_line = f"  • {' / '.join(names)}"
+                                if description:
+                                    cmd_line += f" - {description}"
+                                if admin_only:
+                                    cmd_line += " [管理员]"
+                                plugin_cmds.append(cmd_line)
                 
                 if plugin_cmds:
                     lines.append("插件命令:")
@@ -1565,7 +1573,7 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"处理 plugins 命令失败: {e}", exc_info=True)
             return f"获取插件信息失败: {e}"
-
+        
     async def handle_reload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
         """处理reload_plugin命令(管理员) - 重新加载插件"""
         try:

@@ -162,7 +162,7 @@ class QQBotWebSocketServer:
     def _init_command_system(self):
         """初始化命令系统"""
         if self.config_manager:
-            self.command_handler = CommandHandler(self.config_manager, self.logger)
+            self.command_handler = CommandHandler(self.config_manager, self.logger, self)
             self.command_handlers = CommandHandlers(
                 self.msmp_client, 
                 self.rcon_client,
@@ -356,7 +356,7 @@ class QQBotWebSocketServer:
             names=['plugins', '插件', '/plugins'],
             handler=self.command_handlers.handle_plugins,
             admin_only=False,
-            description='显示插件系统状态',
+            description='查看已加载的插件及其命令',
             usage='plugins',
             command_key='plugins'
         )
@@ -691,43 +691,39 @@ class QQBotWebSocketServer:
             # ③ 最后检查普通命令（help, list, tps等）
             if self.command_handler:
                 try:
-                    # 提取命令和参数
-                    parts = raw_message.split(maxsplit=1)  # 只分割一次，保留参数
+                    parts = raw_message.split(maxsplit=1)
                     base_command = parts[0].lower() if parts else ""
+                    command_args = parts[1] if len(parts) > 1 else ""
                     
-                    # 检查是否是注册的命令
-                    if base_command and base_command in self.command_handler.commands:
-                        # 如果有参数，传递给命令处理器
-                        command_args = parts[1] if len(parts) > 1 else ""
-                        
-                        result = await asyncio.wait_for(
-                            self.command_handler.handle_command(
-                                command_text=base_command,
-                                command_args=command_args,
-                                user_id=user_id,
-                                group_id=group_id,
-                                websocket=websocket,
-                                msmp_client=self.msmp_client,
-                                config_manager=self.config_manager, 
-                                rcon_client=self.rcon_client,
-                                plugin_manager=self.plugin_manager,
-                                connection_manager=self.connection_manager
-                            ),
-                            timeout=30.0
-                        )
-                        
-                        if result:
-                            await self.send_group_message(websocket, group_id, result)
-                    else:
-                        # 不是注册的命令，静默忽略
-                        pass
-                        
+                    if not base_command:
+                        return
+                    
+                    # 调用命令处理器，让它自动判断是插件命令还是内置命令
+                    result = await asyncio.wait_for(
+                        self.command_handler.handle_command(
+                            command_text=base_command,
+                            command_args=command_args,
+                            user_id=user_id,
+                            group_id=group_id,
+                            websocket=websocket,
+                            msmp_client=self.msmp_client,
+                            config_manager=self.config_manager, 
+                            rcon_client=self.rcon_client,
+                            plugin_manager=self.plugin_manager,
+                            connection_manager=self.connection_manager
+                        ),
+                        timeout=30.0
+                    )
+                    
+                    if result:
+                        await self.send_group_message(websocket, group_id, result)
+
                 except asyncio.TimeoutError:
-                    await self.send_group_message(websocket, group_id, "命令执行超时,请稍后重试")
+                    await self.send_group_message(websocket, group_id, "命令执行超时，请稍后重试")
                     self.logger.warning(f"命令执行超时: {raw_message}")
                 except Exception as e:  
                     self.logger.error(f"命令处理失败: {e}", exc_info=True)
-                    await self.send_group_message(websocket, group_id, f"命令执行出错: {str(e)}")
+                    await self.send_group_message(websocket, group_id, f"命令出错: {str(e)}")
         
         elif message_type == 'private':
             if should_log:

@@ -48,9 +48,10 @@ class RateLimiter:
 class CommandHandler:
     """命令处理器"""
     
-    def __init__(self, config_manager, logger: logging.Logger):
+    def __init__(self, config_manager, logger: logging.Logger, qq_server=None):
         self.config_manager = config_manager
         self.logger = logger
+        self.qq_server = qq_server
         self.commands: Dict[str, Command] = {}
         self.rate_limiter = RateLimiter(config_manager.get_command_cooldown())
     
@@ -83,13 +84,59 @@ class CommandHandler:
                        user_id: int,
                        group_id: int,
                        command_args: str = "",
+                       plugin_manager = None,
                        **kwargs) -> Optional[str]:
-        """处理命令"""
+        """处理命令执行"""
         command_text = command_text.strip().lower()
         
         self.logger.debug(f"处理命令: '{command_text}', 参数: '{command_args}', 用户: {user_id}")
         
-        # 查找命令
+        # 第一步：检查是否是插件命令
+        if plugin_manager:
+            for cmd_name, cmd_info in plugin_manager.command_handlers.items():
+                cmd_names = cmd_info.get('names', [])
+                # 检查命令是否匹配（不区分大小写）
+                if command_text in [name.lower() for name in cmd_names]:
+                    self.logger.debug(f"找到插件命令: {cmd_name}")
+                    
+                    handler = cmd_info.get('handler')
+                    admin_only = cmd_info.get('admin_only', False)
+                    is_admin = self.config_manager.is_admin(user_id)
+                    
+                    # 检查权限
+                    if admin_only and not is_admin:
+                        return "权限不足：此命令仅限管理员使用"
+                    
+                    # 执行插件命令
+                    try:
+                        import asyncio
+                        timeout = 60.0 if admin_only else 30.0
+                        
+                        # 准备参数，避免重复传递
+                        plugin_kwargs = {
+                            'command_text': command_args,
+                            'user_id': user_id,
+                            'group_id': group_id,
+                        }
+                        # 添加其他参数，但避免覆盖已有的
+                        for key, value in kwargs.items():
+                            if key not in plugin_kwargs:
+                                plugin_kwargs[key] = value
+                        
+                        result = await asyncio.wait_for(
+                            handler(**plugin_kwargs),
+                            timeout=timeout
+                        )
+                        return result
+                        
+                    except asyncio.TimeoutError:
+                        self.logger.error(f"命令 {cmd_name} 执行超时 ({timeout}秒)")
+                        return f"命令执行超时，请稍后重试"
+                    except Exception as e:
+                        self.logger.error(f"执行插件命令 {cmd_name} 时出错: {e}", exc_info=True)
+                        return f"命令执行失败: {str(e)}"
+        
+        # 第二步：检查内置命令
         command = self.commands.get(command_text)
         
         if not command:
@@ -109,12 +156,12 @@ class CommandHandler:
             # 基础命令权限检查
             if not is_admin and command.command_key:
                 if not self.config_manager.is_command_enabled(command.command_key):
-                    return None  # 命令被禁用,静默返回
+                    return None
         
         # 检查管理员权限
         if command.admin_only and not is_admin:
             if not self.config_manager.is_admin_command_enabled(command.names[0]):
-                return "权限不足:此命令仅限管理员使用"
+                return "权限不足：此命令仅限管理员使用"
         
         # 检查冷却时间
         can_use, remaining = self.rate_limiter.can_use(
@@ -124,17 +171,18 @@ class CommandHandler:
         )
         
         if not can_use:
-            return f"命令冷却中,请等待 {remaining} 秒"
+            return f"命令冷却中，请等待 {remaining} 秒"
         
-        # 执行命令 - 传递参数
+        # 执行命令
         try:
+            import asyncio
             timeout = 60.0 if command.admin_only and command.names[0] in ['start', 'stop', 'log', 'reconnect'] else 30.0
             
             result = await asyncio.wait_for(
                 command.handler(
                     user_id=user_id,
                     group_id=group_id,
-                    command_text=command_args,  # 传递参数给处理器
+                    command_text=command_args,
                     **kwargs
                 ),
                 timeout=timeout
@@ -143,7 +191,7 @@ class CommandHandler:
             
         except asyncio.TimeoutError:
             self.logger.error(f"命令 {command.names[0]} 执行超时 ({timeout}秒)")
-            return f"命令执行超时,请稍后重试或联系管理员"
+            return f"命令执行超时，请稍后重试"
         except Exception as e:
             self.logger.error(f"执行命令 {command.names[0]} 时出错: {e}", exc_info=True)
             return f"命令执行失败: {str(e)}"
@@ -172,7 +220,7 @@ class CommandHandler:
                     if is_admin or (command.command_key and self.config_manager.is_command_enabled(command.command_key)):
                         basic_commands.append(command)
         
-        lines = ["MSMP_QQBot 命令帮助", "══════════"]
+        lines = ["MSMP_QQBot 命令帮助", "••••••••••"]
         
         if basic_commands:
             lines.append("\n【基础命令】")
@@ -247,7 +295,7 @@ class CommandHandler:
             except Exception as e:
                 pass
         
-        # ========== 添加自定义消息监听规则信息 ==========
+        # ========== 添加自定义消息监听器信息 ==========
         if self.config_manager.is_custom_listeners_enabled():
             try:
                 listener_rules = self.config_manager.get_custom_listener_rules()
@@ -261,8 +309,11 @@ class CommandHandler:
                         
                         # 显示前几个规则的名称
                         listener_names = [r.get('name', 'unknown') for r in enabled_listeners]
-                        for name in listener_names:
+                        for name in listener_names[:5]:  # 最多显示5个
                             lines.append(f"• {name}")
+                        
+                        if len(listener_names) > 5:
+                            lines.append(f"... 还有 {len(listener_names) - 5} 个规则")
                         
                         if is_admin:
                             lines.append(f"使用 listeners 查看完整监听规则详情")
@@ -273,10 +324,8 @@ class CommandHandler:
         # 添加使用提示
         if not is_admin:
             lines.append(f"\n提示: 当前有 {len(enabled_admin_commands)} 个管理员命令对您开放")
-            lines.append("   如需更多权限，请联系管理员")
         else:
             lines.append(f"\n您是管理员，可以使用所有命令")
-            lines.append("   使用 #listeners 查看自定义监听规则详情")
         
         return "\n".join(lines)
     
@@ -1470,16 +1519,52 @@ class CommandHandlers:
             return f"获取网络信息失败: {e}"
 
     async def handle_plugins(self, **kwargs) -> str:
-        """处理plugins命令 - 显示插件状态"""
+        """处理 plugins 命令 - 显示已加载的插件及其指令"""
         try:
-            if not self.qq_server.plugin_manager:
+            if not self.qq_server or not hasattr(self.qq_server, 'plugin_manager'):
                 return "插件管理器未初始化"
             
-            return self.qq_server.plugin_manager.get_plugin_status()
+            plugin_manager = self.qq_server.plugin_manager
+            plugins = plugin_manager.plugins
+            
+            if not plugins:
+                return "暂无已加载的插件"
+            
+            lines = [
+                "已加载的插件信息",
+                "=" * 20,
+                f"总数: {len(plugins)} 个\n"
+            ]
+            
+            # 遍历所有插件并显示详细信息
+            for plugin_name, plugin in plugins.items():
+                lines.append(f"【{plugin.name}】v{plugin.version}")
+                lines.append(f"作者: {plugin.author}")
+                lines.append(f"说明: {plugin.description}")
+                lines.append(f"状态: {'启用' if plugin.enabled else '禁用'}")
+                
+                # 显示插件注册的命令
+                plugin_cmds = []
+                for cmd_name, cmd_info in plugin_manager.command_handlers.items():
+                    handler = cmd_info.get('handler')
+                    # 检查处理器是否属于当前插件
+                    if handler and hasattr(handler, '__self__'):
+                        if handler.__self__ == plugin:
+                            names = cmd_info.get('names', [])
+                            if names:
+                                plugin_cmds.append(f"  • {' / '.join(names)}")
+                
+                if plugin_cmds:
+                    lines.append("插件命令:")
+                    lines.extend(plugin_cmds)
+                
+                lines.append("-" * 20)
+            
+            return "\n".join(lines)
             
         except Exception as e:
-            self.logger.error(f"执行plugins命令失败: {e}", exc_info=True)
-            return f"获取插件状态失败: {e}"
+            self.logger.error(f"处理 plugins 命令失败: {e}", exc_info=True)
+            return f"获取插件信息失败: {e}"
 
     async def handle_reload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
         """处理reload_plugin命令(管理员) - 重新加载插件"""

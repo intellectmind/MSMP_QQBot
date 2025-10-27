@@ -69,6 +69,23 @@ class BotPlugin(ABC):
         """
         pass
 
+    def get_plugin_help(self) -> str:
+        """
+        获取插件帮助信息（供全局help命令调用）
+        
+        Returns:
+            str: 插件帮助信息
+            
+        注意: 子类可以重写此方法以提供自定义帮助信息
+        """
+        lines = [
+            f"【{self.name}】 v{self.version}",
+            f"作者: {self.author}",
+            f"说明: {self.description}"
+        ]
+        
+        return "\n".join(lines)
+    
 
 class PluginManager:
     """插件管理器 - 支持热加载"""

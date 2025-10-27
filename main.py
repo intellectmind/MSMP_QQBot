@@ -585,7 +585,7 @@ class ConsoleCommandHandler:
   #server_status   - 查看服务器进程状态
 
 插件管理命令 (使用 # 前缀):
-  #plugins         - 显示所有已加载插件状态
+  #plugins         - 查看已加载的插件及其命令
   #load_plugin <插件名>  - 加载指定插件
   #unload_plugin <插件名> - 卸载指定插件
   #reload_plugin <插件名> - 重新加载指定插件(热重载)

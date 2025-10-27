@@ -10,8 +10,7 @@
 
 import os
 import logging
-from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
 from plugin_manager import BotPlugin
 
 try:
@@ -119,7 +118,6 @@ class PlayerDataModifier:
             return False
         
         try:
-            # 验证坐标范围
             if not (-30000000 <= x <= 30000000 and -64 <= y <= 320 and -30000000 <= z <= 30000000):
                 self.logger.error(f"坐标超出范围: ({x}, {y}, {z})")
                 return False
@@ -159,22 +157,41 @@ class PlayerCoordinatesPlugin(BotPlugin):
     author = "MSMP_QQBot"
     description = "提供玩家坐标查询和修改功能"
     
+    COMMANDS_HELP = {
+        "getpos": {
+            "names": ["getpos", "查询坐标", "查看坐标"],
+            "description": "查询玩家的坐标信息",
+            "usage": "getpos <玩家名>",
+            "admin_only": False,
+        },
+        "setpos": {
+            "names": ["setpos", "设置坐标", "修改坐标"],
+            "description": "修改玩家的坐标（需要玩家离线）",
+            "usage": "setpos <玩家名> <x> <y> <z>",
+            "admin_only": True,
+        },
+        "tppos": {
+            "names": ["tppos", "传送坐标", "tp"],
+            "description": "传送玩家到指定坐标",
+            "usage": "tppos <玩家名> <x> <y> <z>",
+            "admin_only": True,
+        }
+    }
+    
     async def on_load(self, plugin_manager: 'PluginManager') -> bool:
         """插件加载"""
         try:
             self.logger.info(f"正在加载 {self.name} 插件...")
             
             self.plugin_manager = plugin_manager
-            
-            # 初始化玩家数据修改器
-            # 注意: 这里需要从配置管理器获取世界路径
-            # 由于插件无法直接访问 config_manager，我们通过参数传递
             self.modifier = None
-            self.logger.info(f"{self.name} 插件加载成功")
+            self.world_path = None
             
-            # 注册命令
+            # 注册命令（先注册，后初始化 modifier）
             await self._register_commands()
             
+            # 稍后在命令执行时初始化 modifier
+            self.logger.info(f"{self.name} 插件加载成功")
             return True
             
         except Exception as e:
@@ -189,7 +206,6 @@ class PlayerCoordinatesPlugin(BotPlugin):
     async def _register_commands(self):
         """注册命令"""
         
-        # 注册 getpos 命令
         self.plugin_manager.register_command(
             command_name="getpos",
             handler=self.handle_getpos,
@@ -199,7 +215,6 @@ class PlayerCoordinatesPlugin(BotPlugin):
             usage="getpos <玩家名>"
         )
         
-        # 注册 setpos 命令
         self.plugin_manager.register_command(
             command_name="setpos",
             handler=self.handle_setpos,
@@ -209,7 +224,6 @@ class PlayerCoordinatesPlugin(BotPlugin):
             usage="setpos <玩家名> <x> <y> <z>"
         )
         
-        # 注册 tppos 命令
         self.plugin_manager.register_command(
             command_name="tppos",
             handler=self.handle_tppos,
@@ -221,14 +235,78 @@ class PlayerCoordinatesPlugin(BotPlugin):
         
         self.logger.info("已注册所有命令")
     
-    def _set_modifier(self, world_path: str):
-        """设置玩家数据修改器"""
-        self.modifier = PlayerDataModifier(world_path, self.logger)
+    def _init_modifier(self):
+        """延迟初始化 modifier - 在命令执行时调用"""
+        if self.modifier:
+            return  # 已经初始化过了
+        
+        # 启动脚本路径（从配置中获取）
+        start_script = "G:/paper-1.21.10/start.bat"
+        script_dir = os.path.dirname(start_script)
+        
+        # 检查多个可能的位置
+        possible_paths = [
+            os.path.join(script_dir, "world"),  # 启动脚本所在目录
+            "./world",
+            "world",
+            os.path.join(".", "world"),
+        ]
+        
+        for path in possible_paths:
+            # 将 / 转换为 os.sep（Windows 上是 \）
+            path = path.replace("/", os.sep)
+            full_path = os.path.abspath(path)
+            playerdata_path = os.path.join(full_path, "playerdata")
+            
+            self.logger.debug(f"检查路径: {full_path}")
+            
+            if os.path.exists(full_path) and os.path.exists(playerdata_path):
+                self.logger.info(f"找到 world 文件夹: {full_path}")
+                self.world_path = full_path
+                self.modifier = PlayerDataModifier(full_path, self.logger)
+                return
+        
+        self.logger.warning(f"未找到 world/playerdata 目录，已检查的路径: {[os.path.abspath(p.replace('/', os.sep)) for p in possible_paths]}")
+    
+    def get_plugin_help(self) -> str:
+        """获取插件帮助信息"""
+        lines = [
+            f"【{self.name}】 v{self.version}",
+            f"作者: {self.author}",
+            f"说明: {self.description}",
+            ""
+        ]
+        
+        basic_cmds = [cmd for cmd, info in self.COMMANDS_HELP.items() if not info.get("admin_only", False)]
+        if basic_cmds:
+            lines.append("【基础命令】")
+            for cmd in basic_cmds:
+                info = self.COMMANDS_HELP[cmd]
+                main_name = info['names'][0]
+                aliases = ' / '.join(info['names'][1:])
+                lines.append(f"• {main_name}" + (f" ({aliases})" if aliases else ""))
+                lines.append(f"  {info['description']}")
+            lines.append("")
+        
+        admin_cmds = [cmd for cmd, info in self.COMMANDS_HELP.items() if info.get("admin_only", False)]
+        if admin_cmds:
+            lines.append("【管理员命令】")
+            for cmd in admin_cmds:
+                info = self.COMMANDS_HELP[cmd]
+                main_name = info['names'][0]
+                aliases = ' / '.join(info['names'][1:])
+                lines.append(f"• {main_name}" + (f" ({aliases})" if aliases else "") + " [管理员]")
+                lines.append(f"  {info['description']}")
+        
+        return "\n".join(lines)
     
     async def handle_getpos(self, command_text: str = "", user_id: int = 0, **kwargs) -> str:
         """处理 getpos 命令"""
+        # 延迟初始化
+        self._init_modifier()
+        
         if not self.modifier:
-            return "玩家坐标插件未正确初始化"
+            return "玩家坐标插件未正确初始化，找不到 world/playerdata 目录"
         
         try:
             parts = command_text.strip().split()
@@ -259,6 +337,8 @@ class PlayerCoordinatesPlugin(BotPlugin):
     
     async def handle_setpos(self, command_text: str = "", user_id: int = 0, **kwargs) -> str:
         """处理 setpos 命令"""
+        self._init_modifier()
+        
         if not self.modifier:
             return "玩家坐标插件未正确初始化"
         
@@ -266,17 +346,7 @@ class PlayerCoordinatesPlugin(BotPlugin):
             parts = command_text.strip().split()
             
             if len(parts) < 4:
-                return (
-                    "用法错误\n"
-                    f"{'─' * 22}\n"
-                    "命令: setpos <玩家名> <x> <y> <z>\n"
-                    "示例: setpos Steve 100 64 100\n"
-                    f"{'─' * 22}\n"
-                    "注意:\n"
-                    "• 玩家必须离线才能修改\n"
-                    "• 玩家下次登录将在新位置出现\n"
-                    "• 坐标范围: X,Z[-30000000,30000000] Y[-64,320]"
-                )
+                return "用法: setpos <玩家名> <x> <y> <z>"
             
             player_name = parts[0]
             
@@ -287,7 +357,6 @@ class PlayerCoordinatesPlugin(BotPlugin):
             except ValueError:
                 return "错误: 坐标必须是数字!"
             
-            # 验证坐标范围
             if not (-30000000 <= x <= 30000000 and -64 <= y <= 320 and -30000000 <= z <= 30000000):
                 return (
                     f"错误: 坐标超出范围!\n"
@@ -304,8 +373,7 @@ class PlayerCoordinatesPlugin(BotPlugin):
                     f"玩家: {player_name}\n"
                     f"新坐标: ({x:.0f}, {y:.0f}, {z:.0f})\n"
                     f"{'─' * 22}\n"
-                    f"玩家下次登录时将在新位置出现\n"
-                    f"原数据已自动备份"
+                    f"玩家下次登录时将在新位置出现"
                 )
             else:
                 return (
@@ -321,7 +389,7 @@ class PlayerCoordinatesPlugin(BotPlugin):
             return f"命令执行失败: {e}"
     
     async def handle_tppos(self, command_text: str = "", user_id: int = 0, **kwargs) -> str:
-        """处理 tppos 命令 (实际传送需要通过 RCON/MSMP 执行)"""
+        """处理 tppos 命令"""
         try:
             parts = command_text.strip().split()
             
@@ -329,13 +397,27 @@ class PlayerCoordinatesPlugin(BotPlugin):
                 return "用法: tppos <玩家名> <x> <y> <z>"
             
             player_name = parts[0]
-            x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
             
-            # 这里需要通过 RCON 或 MSMP 实际执行传送命令
+            try:
+                x = float(parts[1])
+                y = float(parts[2])
+                z = float(parts[3])
+            except ValueError:
+                return "错误: 坐标必须是数字!"
+            
+            if not (-30000000 <= x <= 30000000 and -64 <= y <= 320 and -30000000 <= z <= 30000000):
+                return (
+                    f"错误: 坐标超出范围!\n"
+                    f"输入坐标: ({x}, {y}, {z})\n"
+                    f"允许范围: X,Z[-30000000,30000000] Y[-64,320]"
+                )
+            
             return (
                 f"传送命令已准备\n"
+                f"{'─' * 22}\n"
                 f"玩家: {player_name}\n"
                 f"目标坐标: ({x}, {y}, {z})\n"
+                f"{'─' * 22}\n"
                 f"请确保玩家在线"
             )
             
@@ -344,12 +426,5 @@ class PlayerCoordinatesPlugin(BotPlugin):
             return f"命令执行失败: {e}"
     
     async def on_config_reload(self, old_config: dict, new_config: dict):
-        """配置重新加载时更新世界路径"""
-        try:
-            # 获取新的世界路径
-            world_path = new_config.get('server', {}).get('world_path')
-            if world_path:
-                self._set_modifier(world_path)
-                self.logger.info("玩家坐标插件配置已更新")
-        except Exception as e:
-            self.logger.error(f"更新玩家坐标插件配置失败: {e}")
+        """配置重新加载"""
+        pass

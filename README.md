@@ -24,7 +24,7 @@
 
 下载插件后直接放入plugins文件夹即可
 
-[可在此下载插件](https://github.com/intellectmind/MSMP_QQBot/tree/main/plugins)
+[可在此下载插件](https://github.com/intellectmind/MSMP_QQBot-Plugins)
 
 [MSMP_QQBot-插件开发者文档](https://github.com/intellectmind/MSMP_QQBot/wiki/MSMP_QQBot-插件开发者文档)
 

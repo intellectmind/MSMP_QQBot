@@ -1,10 +1,9 @@
 """
 玩家坐标管理插件
-这是一个示例插件，演示如何创建 MSMP_QQBot 插件
 
 功能:
 - 获取玩家坐标
-- 修改玩家坐标
+- 修改玩家上线坐标
 - 玩家传送
 """
 
@@ -235,38 +234,85 @@ class PlayerCoordinatesPlugin(BotPlugin):
         
         self.logger.info("已注册所有命令")
     
+    def _get_working_directory(self) -> str:
+        """获取服务器工作目录"""
+        try:
+            # 读取配置文件
+            config_path = "config.yml"
+            if os.path.exists(config_path):
+                import yaml
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+                
+                server_config = config.get('server', {})
+                
+                # 优先使用 working_directory
+                working_dir = server_config.get('working_directory', '')
+                if working_dir and os.path.exists(working_dir):
+                    self.logger.info(f"从配置文件获取工作目录: {working_dir}")
+                    return working_dir
+                
+                # 其次从启动脚本推断
+                start_script = server_config.get('start_script', '')
+                if start_script and os.path.exists(start_script):
+                    working_dir = os.path.dirname(start_script)
+                    self.logger.info(f"从启动脚本推断工作目录: {working_dir}")
+                    return working_dir
+            
+            # 如果配置文件读取失败，尝试常见路径
+            common_paths = [
+                ".",
+                "..",
+                "./server", 
+                "../server",
+            ]
+            
+            for path in common_paths:
+                if os.path.exists(path):
+                    # 检查是否是有效的世界目录
+                    world_test = path
+                    if not os.path.exists(os.path.join(path, "playerdata")):
+                        world_test = os.path.join(path, "world")
+                    
+                    if os.path.exists(world_test) and os.path.exists(os.path.join(world_test, "playerdata")):
+                        self.logger.info(f"找到有效世界目录: {world_test}")
+                        return world_test
+            
+            self.logger.error("无法找到有效的工作目录")
+            return ""
+            
+        except Exception as e:
+            self.logger.error(f"获取工作目录失败: {e}")
+            return ""
+    
     def _init_modifier(self):
         """延迟初始化 modifier - 在命令执行时调用"""
         if self.modifier:
             return  # 已经初始化过了
         
-        # 启动脚本路径（从配置中获取）
-        start_script = "G:/paper-1.21.10/start.bat"
-        script_dir = os.path.dirname(start_script)
+        # 获取工作目录
+        working_dir = self._get_working_directory()
         
-        # 检查多个可能的位置
-        possible_paths = [
-            os.path.join(script_dir, "world"),  # 启动脚本所在目录
-            "./world",
-            "world",
-            os.path.join(".", "world"),
-        ]
+        if not working_dir:
+            self.logger.error("无法确定服务器工作目录")
+            return
         
-        for path in possible_paths:
-            # 将 / 转换为 os.sep（Windows 上是 \）
-            path = path.replace("/", os.sep)
-            full_path = os.path.abspath(path)
-            playerdata_path = os.path.join(full_path, "playerdata")
-            
-            self.logger.debug(f"检查路径: {full_path}")
-            
-            if os.path.exists(full_path) and os.path.exists(playerdata_path):
-                self.logger.info(f"找到 world 文件夹: {full_path}")
-                self.world_path = full_path
-                self.modifier = PlayerDataModifier(full_path, self.logger)
-                return
+        self.logger.info(f"使用工作目录: {working_dir}")
         
-        self.logger.warning(f"未找到 world/playerdata 目录，已检查的路径: {[os.path.abspath(p.replace('/', os.sep)) for p in possible_paths]}")
+        # 检查是否是有效的世界目录
+        if os.path.exists(os.path.join(working_dir, "playerdata")):
+            # working_dir 本身就是世界目录
+            self.world_path = working_dir
+            self.modifier = PlayerDataModifier(working_dir, self.logger)
+            return
+        elif os.path.exists(os.path.join(working_dir, "world", "playerdata")):
+            # working_dir 包含 world 子目录
+            world_path = os.path.join(working_dir, "world")
+            self.world_path = world_path
+            self.modifier = PlayerDataModifier(world_path, self.logger)
+            return
+        else:
+            self.logger.error(f"在工作目录 {working_dir} 中找不到 playerdata 文件夹")
     
     def get_plugin_help(self) -> str:
         """获取插件帮助信息"""
@@ -306,7 +352,7 @@ class PlayerCoordinatesPlugin(BotPlugin):
         self._init_modifier()
         
         if not self.modifier:
-            return "玩家坐标插件未正确初始化，找不到 world/playerdata 目录"
+            return "玩家坐标插件未正确初始化，找不到 world/playerdata 目录。请检查服务器工作目录配置。"
         
         try:
             parts = command_text.strip().split()
@@ -340,7 +386,7 @@ class PlayerCoordinatesPlugin(BotPlugin):
         self._init_modifier()
         
         if not self.modifier:
-            return "玩家坐标插件未正确初始化"
+            return "玩家坐标插件未正确初始化，找不到 world/playerdata 目录。请检查服务器工作目录配置。"
         
         try:
             parts = command_text.strip().split()
@@ -381,7 +427,8 @@ class PlayerCoordinatesPlugin(BotPlugin):
                     "可能原因:\n"
                     f"• 找不到玩家数据: {player_name}\n"
                     "• 玩家可能还在线\n"
-                    "• 文件权限问题"
+                    "• 文件权限问题\n"
+                    "• world/playerdata 目录访问失败"
                 )
             
         except Exception as e:
@@ -427,4 +474,8 @@ class PlayerCoordinatesPlugin(BotPlugin):
     
     async def on_config_reload(self, old_config: dict, new_config: dict):
         """配置重新加载"""
-        pass
+        # 当配置重新加载时，重置 modifier 以便重新初始化
+        if self.modifier:
+            self.logger.info("配置已重新加载，重置玩家数据修改器")
+            self.modifier = None
+            self.world_path = None

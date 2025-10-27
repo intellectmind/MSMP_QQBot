@@ -9,6 +9,7 @@ import logging
 import importlib.util
 import asyncio
 import time
+import nbtlib
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Set
 from abc import ABC, abstractmethod

@@ -4,7 +4,7 @@
 
 配置文件可自动热重载（有修改保存就自动重载）
 
-拥有强大的自定义服务端日志监听器，详见[wiki](https://github.com/intellectmind/MSMP_QQBot/wiki/custom_listeners)
+拥有强大的自定义服务端监听器和自定义指令监听器，详见[wiki](https://github.com/intellectmind/MSMP_QQBot/wiki)
 
 ----------------------------------------------------------------------------------------------------------
 

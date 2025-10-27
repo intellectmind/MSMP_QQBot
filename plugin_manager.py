@@ -537,3 +537,56 @@ class PluginManager:
                 lines.append(f"    状态: {'启用' if plugin.enabled else '禁用'}")
         
         return "\n".join(lines)
+
+    def find_plugin_by_name(self, search_name: str) -> Optional[BotPlugin]:
+        """
+        通过插件文件名或插件名称查找插件
+        
+        Args:
+            search_name: 插件文件名或插件显示名称
+            
+        Returns:
+            找到的插件实例，未找到返回None
+        """
+        search_name_lower = search_name.lower().strip()
+        
+        # 1. 首先按文件名查找（精确匹配）
+        if search_name_lower in self.plugins:
+            return self.plugins[search_name_lower]
+        
+        # 2. 按插件显示名称查找（不区分大小写，包含匹配）
+        for plugin_name, plugin in self.plugins.items():
+            plugin_display_name = plugin.name.lower() if plugin.name else ""
+            if (search_name_lower in plugin_display_name or 
+                search_name_lower == plugin_name):
+                return plugin
+        
+        # 3. 尝试模糊匹配（包含关系）
+        for plugin_name, plugin in self.plugins.items():
+            plugin_display_name = plugin.name.lower() if plugin.name else ""
+            if (search_name_lower in plugin_display_name or 
+                search_name_lower in plugin_name.lower()):
+                return plugin
+        
+        return None
+
+    def get_plugin_search_hints(self, search_name: str) -> List[str]:
+        """
+        获取插件搜索提示
+        
+        Args:
+            search_name: 搜索名称
+            
+        Returns:
+            匹配的插件名称列表
+        """
+        search_name_lower = search_name.lower().strip()
+        hints = []
+        
+        for plugin_name, plugin in self.plugins.items():
+            plugin_display_name = plugin.name.lower() if plugin.name else ""
+            if (search_name_lower in plugin_display_name or 
+                search_name_lower in plugin_name.lower()):
+                hints.append(f"{plugin.name} (文件名: {plugin_name})")
+        
+        return hints

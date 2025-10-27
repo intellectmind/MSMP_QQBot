@@ -6,6 +6,7 @@ import asyncio
 from typing import Callable, Dict, List, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
+from plugin_manager import BotPlugin
 
 @dataclass
 class Command:
@@ -326,7 +327,7 @@ class CommandHandler:
             lines.append(f"\n提示: 当前有 {len(enabled_admin_commands)} 个管理员命令对您开放")
         else:
             lines.append(f"\n您是管理员，可以使用所有命令")
-        
+
         return "\n".join(lines)
     
     def list_commands(self, admin_only: bool = False) -> List[str]:
@@ -1518,8 +1519,8 @@ class CommandHandlers:
             self.logger.error(f"执行network命令失败: {e}", exc_info=True)
             return f"获取网络信息失败: {e}"
 
-    async def handle_plugins(self, **kwargs) -> str:
-        """处理 plugins 命令 - 显示已加载的插件及其指令"""
+    async def handle_plugins(self, command_text: str = "", **kwargs) -> str:
+        """处理 plugins 命令 - 显示已加载的插件及其指令，支持查看单个插件详情"""
         try:
             if not self.qq_server or not hasattr(self.qq_server, 'plugin_manager'):
                 return "插件管理器未初始化"
@@ -1530,15 +1531,68 @@ class CommandHandlers:
             if not plugins:
                 return "暂无已加载的插件"
             
+            # 如果有参数，显示单个插件的详细帮助
+            if command_text:
+                search_name = command_text.strip()
+                
+                # 使用新的查找方法
+                plugin = plugin_manager.find_plugin_by_name(search_name)
+                
+                if not plugin:
+                    # 提供搜索提示
+                    hints = plugin_manager.get_plugin_search_hints(search_name)
+                    if hints:
+                        lines = [f"未找到精确匹配的插件: {search_name}", "您可能想查看:"]
+                        lines.extend([f"• {hint}" for hint in hints])
+                        return "\n".join(lines)
+                    else:
+                        available_plugins = []
+                        for plugin_name, plugin_obj in plugins.items():
+                            available_plugins.append(f"{plugin_obj.name} (文件名: {plugin_name})")
+                        
+                        return (
+                            f"未找到插件: {search_name}\n"
+                            f"可用插件: {', '.join(available_plugins)}"
+                        )
+                
+                # 获取插件的实际文件名（用于显示）
+                plugin_filename = None
+                for filename, plugin_obj in plugins.items():
+                    if plugin_obj == plugin:
+                        plugin_filename = filename
+                        break
+                
+                # 使用插件的 get_plugin_help 方法
+                if hasattr(plugin, 'get_plugin_help'):
+                    plugin_help = plugin.get_plugin_help()
+                    if plugin_help and plugin_help.strip():
+                        # 在帮助信息开头添加插件标识
+                        help_lines = plugin_help.split('\n')
+                        if plugin_filename:
+                            identifier_line = f"[插件文件: {plugin_filename}]"
+                            if help_lines and not help_lines[0].startswith('['):
+                                help_lines.insert(0, identifier_line)
+                            elif len(help_lines) > 1 and not help_lines[1].startswith('['):
+                                help_lines.insert(1, identifier_line)
+                        return '\n'.join(help_lines)
+                    else:
+                        # 如果插件没有提供帮助信息，显示基本信息
+                        return self._format_plugin_basic_info(plugin, plugin_filename)
+                else:
+                    # 如果插件没有 get_plugin_help 方法，显示基本信息
+                    return self._format_plugin_basic_info(plugin, plugin_filename)
+            
+            # 没有参数时，显示所有插件列表（原有逻辑）
             lines = [
                 "已加载的插件信息",
                 "=" * 20,
                 f"总数: {len(plugins)} 个\n"
             ]
             
-            # 遍历所有插件并显示详细信息
+            # 遍历所有插件并显示基本信息
             for plugin_name, plugin in plugins.items():
                 lines.append(f"【{plugin.name}】v{plugin.version}")
+                lines.append(f"文件: {plugin_name}.py")
                 lines.append(f"作者: {plugin.author}")
                 lines.append(f"说明: {plugin.description}")
                 lines.append(f"状态: {'启用' if plugin.enabled else '禁用'}")
@@ -1568,11 +1622,39 @@ class CommandHandlers:
                 
                 lines.append("-" * 20)
             
+            # 添加使用提示
+            lines.append("\n使用提示:")
+            lines.append("• 使用 'plugins <插件名>' 查看单个插件的详细帮助")
+            lines.append("• 支持使用插件文件名或显示名称进行搜索")
+            lines.append("• 示例:")
+            lines.append("  - plugins chunk_deleter  (使用文件名)")
+            lines.append("  - plugins 'Chunk Deleter' (使用显示名称)")
+            lines.append("  - plugins chunk          (使用部分名称)")
+            
             return "\n".join(lines)
             
         except Exception as e:
             self.logger.error(f"处理 plugins 命令失败: {e}", exc_info=True)
             return f"获取插件信息失败: {e}"
+
+    def _format_plugin_basic_info(self, plugin, plugin_filename: str = None) -> str:
+        """格式化插件基本信息"""
+        lines = [
+            f"【{plugin.name}】v{plugin.version}",
+            f"作者: {plugin.author}",
+            f"说明: {plugin.description}",
+            f"状态: {'启用' if plugin.enabled else '禁用'}"
+        ]
+        
+        if plugin_filename:
+            lines.append(f"文件: {plugin_filename}.py")
+        
+        lines.extend([
+            "",
+            "该插件没有提供详细的帮助信息。"
+        ])
+        
+        return "\n".join(lines)
         
     async def handle_reload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
         """处理reload_plugin命令(管理员) - 重新加载插件"""
@@ -1581,44 +1663,89 @@ class CommandHandlers:
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
-                return "用法: #reload_plugin <插件名称>"
+                return "用法: #reload_plugin <插件名称或显示名称>"
             
-            plugin_name = command_text.strip()
+            search_name = command_text.strip()
             
             if not self.qq_server.plugin_manager:
                 return "插件管理器未初始化"
             
-            success = await self.qq_server.plugin_manager.reload_plugin(plugin_name)
+            plugin = self.qq_server.plugin_manager.find_plugin_by_name(search_name)
+            if not plugin:
+                return f"未找到插件: {search_name}"
+            
+            # 获取插件的实际文件名
+            plugin_filename = None
+            for filename, plugin_obj in self.qq_server.plugin_manager.plugins.items():
+                if plugin_obj == plugin:
+                    plugin_filename = filename
+                    break
+            
+            if not plugin_filename:
+                return f"无法确定插件的文件名: {search_name}"
+            
+            success = await self.qq_server.plugin_manager.reload_plugin(plugin_filename)
             
             if success:
-                return f"插件 '{plugin_name}' 重载成功"
+                return f"插件 '{plugin.name}' (文件: {plugin_filename}) 重载成功"
             else:
-                return f"插件 '{plugin_name}' 重载失败"
+                return f"插件 '{plugin.name}' (文件: {plugin_filename}) 重载失败"
                 
         except Exception as e:
             self.logger.error(f"执行reload_plugin命令失败: {e}", exc_info=True)
             return f"重载插件失败: {e}"
 
+
     async def handle_unload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
         """处理unload_plugin命令(管理员) - 卸载插件"""
         try:
-            if not self.config_manager.is_admin(user_id):
+            # 控制台调用时跳过权限检查
+            from_console = kwargs.get('from_console', False)
+            if not from_console and not self.config_manager.is_admin(user_id):
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
-                return "用法: #unload_plugin <插件名称>"
+                return "用法: #unload_plugin <插件名称或显示名称>"
             
-            plugin_name = command_text.strip()
+            search_name = command_text.strip()
             
             if not self.qq_server.plugin_manager:
                 return "插件管理器未初始化"
             
-            success = await self.qq_server.plugin_manager.unload_plugin(plugin_name)
+            plugin = self.qq_server.plugin_manager.find_plugin_by_name(search_name)
+            if not plugin:
+                # 提供搜索提示
+                hints = self.qq_server.plugin_manager.get_plugin_search_hints(search_name)
+                if hints:
+                    lines = [f"未找到精确匹配的插件: {search_name}", "您可能想卸载:"]
+                    lines.extend([f"• {hint}" for hint in hints])
+                    return "\n".join(lines)
+                else:
+                    available_plugins = []
+                    for plugin_name, plugin_obj in self.qq_server.plugin_manager.plugins.items():
+                        available_plugins.append(f"{plugin_obj.name} (文件: {plugin_name})")
+                    
+                    return (
+                        f"未找到插件: {search_name}\n"
+                        f"当前已加载的插件: {', '.join(available_plugins)}"
+                    )
+            
+            # 获取插件的实际文件名
+            plugin_filename = None
+            for filename, plugin_obj in self.qq_server.plugin_manager.plugins.items():
+                if plugin_obj == plugin:
+                    plugin_filename = filename
+                    break
+            
+            if not plugin_filename:
+                return f"无法确定插件的文件名: {search_name}"
+            
+            success = await self.qq_server.plugin_manager.unload_plugin(plugin_filename)
             
             if success:
-                return f"插件 '{plugin_name}' 卸载成功"
+                return f"插件 '{plugin.name}' (文件: {plugin_filename}) 卸载成功"
             else:
-                return f"插件 '{plugin_name}' 卸载失败"
+                return f"插件 '{plugin.name}' (文件: {plugin_filename}) 卸载失败"
                 
         except Exception as e:
             self.logger.error(f"执行unload_plugin命令失败: {e}", exc_info=True)
@@ -1633,44 +1760,122 @@ class CommandHandlers:
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
-                return "用法: #load_plugin <插件名称>"
+                return "用法: #load_plugin <插件名称或显示名称>"
             
-            plugin_name = command_text.strip()
+            search_name = command_text.strip()
             
             # 移除可能的.py后缀
-            if plugin_name.endswith('.py'):
-                plugin_name = plugin_name[:-3]
+            if search_name.endswith('.py'):
+                search_name = search_name[:-3]
             
             if not self.qq_server.plugin_manager:
                 return "插件管理器未初始化"
             
-            self.logger.info(f"开始加载插件: {plugin_name}")
+            self.logger.info(f"开始加载插件: {search_name}")
             
-            # 检查插件是否已经加载
-            existing_plugin = self.qq_server.plugin_manager.get_plugin(plugin_name)
+            # 首先检查插件是否已经加载
+            existing_plugin = self.qq_server.plugin_manager.find_plugin_by_name(search_name)
             if existing_plugin:
-                return f"插件 '{plugin_name}' 已经加载"
+                # 获取已加载插件的文件名
+                existing_filename = None
+                for filename, plugin_obj in self.qq_server.plugin_manager.plugins.items():
+                    if plugin_obj == existing_plugin:
+                        existing_filename = filename
+                        break
+                
+                if existing_filename:
+                    return f"插件 '{existing_plugin.name}' (文件: {existing_filename}) 已经加载"
+                else:
+                    return f"插件 '{existing_plugin.name}' 已经加载"
+            
+            # 检查插件文件是否存在（支持多种查找方式）
+            plugin_file = None
+            plugin_dir = Path(self.qq_server.plugin_manager.plugin_dir)
+            
+            # 1. 直接按文件名查找
+            potential_files = [
+                plugin_dir / f"{search_name}.py",
+                plugin_dir / f"{search_name.lower()}.py",
+                plugin_dir / f"{search_name.replace(' ', '_')}.py",
+                plugin_dir / f"{search_name.replace(' ', '_').lower()}.py"
+            ]
+            
+            for file_path in potential_files:
+                if file_path.exists():
+                    plugin_file = file_path
+                    break
+            
+            # 2. 如果直接查找失败，尝试在所有插件文件中搜索匹配的名称
+            if not plugin_file:
+                all_plugin_files = list(plugin_dir.glob("*.py"))
+                for file_path in all_plugin_files:
+                    if file_path.name.startswith("_"):
+                        continue
+                    
+                    # 尝试加载模块并检查插件名称
+                    try:
+                        module_name = file_path.stem
+                        spec = importlib.util.spec_from_file_location(module_name, file_path)
+                        if spec and spec.loader:
+                            module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(module)
+                            
+                            # 查找插件类
+                            plugin_class = None
+                            for item_name in dir(module):
+                                item = getattr(module, item_name)
+                                if (isinstance(item, type) and 
+                                    issubclass(item, BotPlugin) and 
+                                    item is not BotPlugin):
+                                    plugin_class = item
+                                    break
+                            
+                            if plugin_class:
+                                # 创建临时实例检查名称
+                                temp_plugin = plugin_class(self.logger)
+                                if (search_name.lower() in temp_plugin.name.lower() or 
+                                    search_name.lower() in module_name.lower()):
+                                    plugin_file = file_path
+                                    break
+                    except Exception:
+                        continue
+            
+            if not plugin_file:
+                # 列出所有可用的插件文件
+                available_files = []
+                for file_path in plugin_dir.glob("*.py"):
+                    if not file_path.name.startswith("_"):
+                        available_files.append(file_path.stem)
+                
+                if available_files:
+                    return (
+                        f"未找到插件文件: {search_name}\n"
+                        f"可用的插件文件: {', '.join(available_files)}"
+                    )
+                else:
+                    return f"未找到插件文件: {search_name}，插件目录为空"
             
             # 尝试加载插件
-            success = await self.qq_server.plugin_manager.load_plugin(plugin_name)
+            plugin_filename = plugin_file.stem
+            success = await self.qq_server.plugin_manager.load_plugin(plugin_filename)
             
             if success:
                 # 再次确认插件确实加载成功
-                loaded_plugin = self.qq_server.plugin_manager.get_plugin(plugin_name)
+                loaded_plugin = self.qq_server.plugin_manager.get_plugin(plugin_filename)
                 if loaded_plugin:
-                    return f"插件 '{plugin_name}' 加载成功"
+                    return f"插件 '{loaded_plugin.name}' (文件: {plugin_filename}) 加载成功"
                 else:
-                    self.logger.warning(f"插件 {plugin_name} 加载返回成功但未找到插件实例")
-                    return f"插件 '{plugin_name}' 加载状态异常"
+                    self.logger.warning(f"插件 {plugin_filename} 加载返回成功但未找到插件实例")
+                    return f"插件 '{search_name}' 加载状态异常"
             else:
                 # 检查插件是否实际上加载成功了（处理异步加载的情况）
-                loaded_plugin = self.qq_server.plugin_manager.get_plugin(plugin_name)
+                loaded_plugin = self.qq_server.plugin_manager.get_plugin(plugin_filename)
                 if loaded_plugin:
-                    self.logger.warning(f"插件 {plugin_name} 加载返回失败但实际已加载")
-                    return f"插件 '{plugin_name}' 已加载（状态报告异常）"
+                    self.logger.warning(f"插件 {plugin_filename} 加载返回失败但实际已加载")
+                    return f"插件 '{loaded_plugin.name}' (文件: {plugin_filename}) 已加载（状态报告异常）"
                 else:
-                    return f"插件 '{plugin_name}' 加载失败，请检查插件文件是否存在"
-                
+                    return f"插件 '{search_name}' 加载失败，请检查插件文件是否正确"
+                    
         except Exception as e:
             self.logger.error(f"执行load_plugin命令失败: {e}", exc_info=True)
             return f"加载插件失败: {e}"

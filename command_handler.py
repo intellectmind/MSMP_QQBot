@@ -367,7 +367,7 @@ class CommandHandlers:
         self.logger.info("已进入关闭模式，停止所有连接检测")
     
     async def handle_list(self, **kwargs) -> str:
-        """处理list命令 - 支持MSMP和多格式RCON"""
+        """处理list命令"""
         try:
             client_type, client = await self.qq_server.connection_manager.get_preferred_client()
             
@@ -377,216 +377,26 @@ class CommandHandlers:
             try:
                 if client_type == 'msmp':
                     player_info = client.get_player_list_sync()
-                    return self._format_msmp_list(player_info)
-                else:  # RCON
-                    return await self._handle_rcon_list(client)
+                else:
+                    player_info = client.get_player_list()
             except Exception as e:
                 self.logger.error(f"获取玩家列表失败: {e}")
                 return f"获取玩家列表失败: {str(e)}"
             
-        except Exception as e:
-            self.logger.error(f"执行list命令失败: {e}", exc_info=True)
-            return f"获取玩家列表失败: {e}"
-
-    def _format_msmp_list(self, player_info) -> str:
-        """格式化MSMP玩家列表"""
-        lines = [f"在线人数: {player_info.current_players}/{player_info.max_players}"]
-        
-        if player_info.current_players > 0 and player_info.player_names:
-            player_list = "    ".join(player_info.player_names)
-            lines.append(f"在线玩家:\n{player_list}")
-        else:
-            lines.append("暂无玩家在线")
-        
-        lines.append("[通过 MSMP 查询]")
-        return "\n".join(lines)
-
-    async def _handle_rcon_list(self, rcon_client) -> str:
-        """处理RCON list命令 - 支持多种格式"""
-        try:
-            raw_output = rcon_client.execute_command("list")
+            lines = [f"在线人数: {player_info.current_players}/{player_info.max_players}"]
             
-            if not raw_output:
-                return "在线人数: 0/?\n暂无玩家在线\n[通过 RCON 查询]"
-            
-            # 尝试解析
-            parsed = await self._parse_rcon_list_output(raw_output)
-            
-            lines = [f"在线人数: {parsed['current']}/{parsed['max']}"]
-            
-            if parsed['players']:
-                # 每行显示固定数量的玩家(用制表符对齐)
-                players_str = "    ".join(parsed['players'])
-                lines.append(f"在线玩家:\n{players_str}")
+            if player_info.current_players > 0 and player_info.player_names:
+                player_list = "    ".join(player_info.player_names)
+                lines.append(f"在线玩家:\n{player_list}")
             else:
-                lines.append("暂无玩家在线")
+                lines.append("\n暂无玩家在线")
             
-            lines.append("[通过 RCON 查询]")
+            lines.append(f"\n[通过 {client_type.upper()} 查询]")
             return "\n".join(lines)
             
         except Exception as e:
-            self.logger.error(f"处理RCON list命令失败: {e}")
-            return f"处理玩家列表失败: {e}"
-
-    async def _parse_rcon_list_output(self, raw_output: str) -> dict:
-        """解析RCON list命令的输出
-        
-        支持格式:
-        1. "There are 1 of a max of 25 players online: Esc"
-        2. "玩家在线 7/9999\n服主在线: tian_cuo\ndefault: Aiden_114, ..."
-        
-        Returns:
-            {'current': int, 'max': int, 'players': [str, ...]}
-        """
-        result = {
-            'current': 0,
-            'max': 0,
-            'players': []
-        }
-        
-        try:
-            lines = raw_output.strip().split('\n')
-            
-            # ============ 格式1检测: 英文格式 ============
-            # "There are X of a max of Y players online: player1, player2, ..."
-            for line in lines:
-                if 'There are' in line and 'of a max of' in line and 'players online' in line:
-                    self.logger.debug(f"检测到英文格式 list 输出")
-                    return self._parse_english_list(line)
-            
-            # ============ 格式2检测: 中文格式 ============
-            # "玩家在线 X/Y" 开头
-            for line in lines:
-                if '玩家在线' in line or 'players online' in line:
-                    self.logger.debug(f"检测到中文格式 list 输出")
-                    return self._parse_chinese_list(lines)
-            
-            # ============ 格式3: 其他可能格式(备用) ============
-            # 如果没有特殊格式,尝试通用解析
-            self.logger.debug(f"使用通用格式解析 list 输出")
-            return self._parse_generic_list(raw_output)
-            
-        except Exception as e:
-            self.logger.error(f"解析RCON list输出失败: {e}")
-            return result
-
-    def _parse_english_list(self, line: str) -> dict:
-        """解析英文格式: "There are 1 of a max of 25 players online: Esc"
-        
-        示例:
-        - "There are 0 of a max of 25 players online: "
-        - "There are 3 of a max of 25 players online: player1, player2, player3"
-        """
-        result = {
-            'current': 0,
-            'max': 0,
-            'players': []
-        }
-        
-        try:
-            # 提取人数: "There are X of a max of Y"
-            match = re.search(r'There are (\d+) of a max of (\d+)', line)
-            if match:
-                result['current'] = int(match.group(1))
-                result['max'] = int(match.group(2))
-            
-            # 提取玩家列表: ": player1, player2, ..."
-            if ':' in line:
-                players_part = line.split(':', 1)[1].strip()
-                if players_part:
-                    # 按逗号分割(可能还有其他分隔符)
-                    players = [p.strip() for p in players_part.split(',') if p.strip()]
-                    result['players'] = players
-            
-            self.logger.debug(f"英文格式解析结果: {result['current']}/{result['max']}, 玩家数: {len(result['players'])}")
-            
-        except Exception as e:
-            self.logger.debug(f"英文格式解析异常: {e}")
-        
-        return result
-
-    def _parse_chinese_list(self, lines: list) -> dict:
-        """解析中文格式:
-        玩家在线 7/9999
-        服主在线: tian_cuo
-        default: Aiden_114, Fallruit_Cho, ...
-        """
-        result = {
-            'current': 0,
-            'max': 0,
-            'players': []
-        }
-        
-        try:
-            all_players = []
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # 提取人数: "玩家在线 X/Y" 或 "玩家在线: X/Y"
-                if '玩家在线' in line:
-                    match = re.search(r'(\d+)/(\d+)', line)
-                    if match:
-                        result['current'] = int(match.group(1))
-                        result['max'] = int(match.group(2))
-                    continue
-                
-                # 提取分组玩家: "分组名: player1, player2, ..."
-                if ':' in line:
-                    parts = line.split(':', 1)
-                    players_str = parts[1].strip()
-                    
-                    # 按逗号分割玩家
-                    players = [p.strip() for p in players_str.split(',') if p.strip()]
-                    all_players.extend(players)
-            
-            result['players'] = all_players
-            self.logger.debug(f"中文格式解析结果: {result['current']}/{result['max']}, 玩家数: {len(result['players'])}")
-            
-        except Exception as e:
-            self.logger.debug(f"中文格式解析异常: {e}")
-        
-        return result
-
-    def _parse_generic_list(self, raw_output: str) -> dict:
-        """通用格式解析(备用方案)"""
-        result = {
-            'current': 0,
-            'max': 0,
-            'players': []
-        }
-        
-        try:
-            # 尝试提取 X/Y 格式的数字
-            match = re.search(r'(\d+)/(\d+)', raw_output)
-            if match:
-                result['current'] = int(match.group(1))
-                result['max'] = int(match.group(2))
-            
-            # 尽量提取玩家名称(英文和中文都支持)
-            # 去除数字和特殊符号,保留可能的玩家名
-            lines = raw_output.split('\n')
-            for line in lines:
-                line = line.strip()
-                # 跳过包含特殊符息的行
-                if any(keyword in line for keyword in ['玩家在线', 'players online', 'of a max']):
-                    continue
-                
-                # 尝试从行中提取玩家名(以冒号或逗号分隔)
-                if ':' in line:
-                    players_part = line.split(':', 1)[1].strip()
-                    if players_part:
-                        players = [p.strip() for p in players_part.split(',') if p.strip()]
-                        result['players'].extend(players)
-            
-            self.logger.debug(f"通用格式解析结果: {result['current']}/{result['max']}, 玩家数: {len(result['players'])}")
-            
-        except Exception as e:
-            self.logger.debug(f"通用格式解析异常: {e}")
-        
-        return result
+            self.logger.error(f"执行list命令失败: {e}", exc_info=True)
+            return f"获取玩家列表失败: {e}"
 
     async def handle_tps(self, **kwargs) -> str:
         """处理tps命令"""

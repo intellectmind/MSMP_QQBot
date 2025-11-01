@@ -150,7 +150,10 @@ class ConfigManager:
             'server': {
                 'start_script': '',
                 'working_directory': '',
-                'startup_timeout': 300
+                'startup_timeout': 300,
+                'auto_restart_on_crash': False,
+                'crash_restart_delay': 10,
+                'log_idle_restart_timeout': 0
             },
             'commands': {
                 'tps_command': 'tps',
@@ -525,6 +528,18 @@ class ConfigManager:
     def get_server_startup_timeout(self) -> int:
         return self.config.get('server', {}).get('startup_timeout', 300)
     
+    def is_auto_restart_on_crash_enabled(self) -> bool:
+        """是否启用崩溃后自动重启"""
+        return self.config.get('server', {}).get('auto_restart_on_crash', False)
+
+    def get_crash_restart_delay(self) -> int:
+        """获取异常停止重启延迟(秒)"""
+        return self.config.get('server', {}).get('crash_restart_delay', 10)
+
+    def get_log_idle_restart_timeout(self) -> int:
+        """获取日志空闲重启超时时间(秒),0表示关闭"""
+        return self.config.get('server', {}).get('log_idle_restart_timeout', 0)
+
     # ============ 命令配置 ============
     def get_tps_command(self) -> str:
         return self.config.get('commands', {}).get('tps_command', 'tps')

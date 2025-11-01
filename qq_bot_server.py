@@ -54,6 +54,15 @@ class QQBotWebSocketServer:
         self.connected_clients = set()
         self.server_process = None
         self.server_stopping = False
+
+        # 日志空闲监控
+        self._last_log_update_time = None
+        self._log_idle_monitor_task = None
+        # 标记是否为日志空闲导致的关闭
+        self._log_idle_kill = False
+        
+        # 标记是否为手动kill
+        self._manual_kill = False
         
         max_logs = config_manager.get_max_server_logs() if config_manager else 100
         self.server_logs = deque(maxlen=max_logs)
@@ -392,8 +401,11 @@ class QQBotWebSocketServer:
     def _store_server_log(self, log_line: str):
         """存储服务器日志到内存和文件
         
+        捕获的是 _read_server_output() 读取到的 MC 服务器标准输出日志
+        同时用于触发日志空闲重启检测
+        
         Args:
-            log_line: 单条日志行
+            log_line: 单条MC服务器输出日志行
         """
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -401,6 +413,9 @@ class QQBotWebSocketServer:
         
         # 添加到 deque（自动限制大小，旧数据自动删除）
         self.server_logs.append(formatted_log)
+        
+        # 更新日志最后更新时间
+        self._last_log_update_time = time.time()
         
         # 写入到日志文件
         self._write_to_log_file(formatted_log)
@@ -1368,6 +1383,16 @@ class QQBotWebSocketServer:
             # 启动日志读取和进程监控
             asyncio.create_task(self._read_server_output())
             asyncio.create_task(self._monitor_server_process(websocket, group_id))
+
+            # 重置所有标记
+            self._manual_kill = False
+            self._log_idle_kill = False
+            self._last_log_update_time = time.time()
+            
+            # 启动日志空闲监控
+            if self.config_manager and self.config_manager.get_log_idle_restart_timeout() > 0:
+                self._log_idle_monitor_task = asyncio.create_task(self._monitor_log_idle())
+                self.logger.info("日志空闲监控已启动")
             
         except Exception as e:
             self.logger.error(f"启动服务器进程失败: {e}", exc_info=True)
@@ -1382,6 +1407,84 @@ class QQBotWebSocketServer:
             self.server_process = None
             self._close_log_file()
             raise
+
+    async def _monitor_log_idle(self):
+        """监控日志空闲时间 - 如果日志长时间未更新则自动重启服务器
+        
+        监控的是 _store_server_log() 方法更新的时间戳
+        当 MC 服务器假死、卡顿导致无日志输出时，自动触发重启
+        """
+        timeout = self.config_manager.get_log_idle_restart_timeout()
+        
+        if timeout <= 0:
+            self.logger.debug("日志空闲监控已禁用")
+            return
+        
+        self.logger.info(f"日志空闲监控已启动,超时时间: {timeout}秒")
+        self.logger.info("监控的是 MC 服务器标准输出日志,如果日志超过设定时间未更新则自动重启")
+        
+        try:
+            while self.server_process and self.server_process.poll() is None:
+                # 检查是否有日志更新记录
+                if self._last_log_update_time is None:
+                    # 第一次运行,初始化时间
+                    self._last_log_update_time = time.time()
+                    await asyncio.sleep(10)  # 先等待一段时间让日志开始输出
+                    continue
+                
+                # 计算距离上次日志更新的时间
+                time_since_last_log = time.time() - self._last_log_update_time
+                
+                if time_since_last_log > timeout:
+                    self.logger.warning(
+                        f"检测到 MC 服务器日志已{time_since_last_log:.0f}秒未更新(超时: {timeout}秒),准备自动重启..."
+                    )
+                    
+                    # 设置标记，防止异常停止重启再次触发
+                    self._log_idle_kill = True
+                    
+                    # 发送通知消息（这里发送一次，_monitor_server_process 中就不要再发送了）
+                    if self.current_connection and not self.current_connection.closed:
+                        msg = f"检测到服务器日志已停止更新({int(time_since_last_log)}秒),正在自动重启..."
+                        for group_id in self.allowed_groups:
+                            try:
+                                await self.send_group_message(self.current_connection, group_id, msg)
+                            except Exception as e:
+                                self.logger.debug(f"发送通知失败: {e}")
+                    
+                    # 杀死进程
+                    try:
+                        if self.server_process and self.server_process.poll() is None:
+                            import signal
+                            pid = self.server_process.pid
+                            self.logger.info(f"因日志空闲,强制终止进程 {pid}")
+                            
+                            if os.name == 'nt':
+                                import subprocess
+                                try:
+                                    subprocess.run(
+                                        ['taskkill', '/F', '/T', '/PID', str(pid)],
+                                        timeout=10,
+                                        capture_output=True
+                                    )
+                                except:
+                                    os.kill(pid, signal.SIGTERM)
+                            else:
+                                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    
+                    except Exception as e:
+                        self.logger.error(f"强制终止进程失败: {e}")
+                    
+                    # 退出监控,由 _monitor_server_process 处理重启
+                    return
+                
+                # 每5秒检查一次
+                await asyncio.sleep(5)
+        
+        except asyncio.CancelledError:
+            self.logger.debug("日志空闲监控被取消")
+        except Exception as e:
+            self.logger.error(f"日志空闲监控异常: {e}", exc_info=True)
 
     def _decode_line(self, line_bytes: bytes) -> str:
         """尝试用多种编码解码一行输出,优先保留中文"""
@@ -1567,7 +1670,7 @@ class QQBotWebSocketServer:
             self.logger.error(f"发送启动通知失败: {e}")
 
     async def _monitor_server_process(self, websocket, group_id: int):
-        """监控服务器进程状态"""
+        """监控服务器进程状态 - 支持异常停止自动无限重启"""
         try:
             self.logger.info("开始监控服务器进程...")
             
@@ -1578,9 +1681,119 @@ class QQBotWebSocketServer:
             
             self.logger.info(f"服务器进程退出,返回码: {return_code}")
             
-            # 等待日志采集任务完成（给一点时间读取剩余输出）
+            # 等待日志采集任务完成
             await asyncio.sleep(2)
             
+            # ============ 检查是否为手动kill ============
+            if self._manual_kill:
+                self.logger.info("检测到手动kill命令,跳过自动重启")
+                self._manual_kill = False  # 重置标记
+                
+                # 执行关闭逻辑
+                if hasattr(self, 'command_handlers'):
+                    await self.command_handlers._close_all_connections()
+                else:
+                    self._close_log_file()
+                
+                self.server_process = None
+                return  # 退出,不进行任何重启
+            
+            # ============ 检查是否为日志空闲导致的关闭 ============
+            if self._log_idle_kill:
+                self.logger.info("检测到日志空闲导致的关闭,跳过异常停止重启")
+                self._log_idle_kill = False  # 重置标记
+                
+                # 重置日志更新时间
+                self._last_log_update_time = time.time()
+                
+                # 等待重启延迟
+                delay = self.config_manager.get_crash_restart_delay()
+                self.logger.info(f"等待{delay}秒后进行重启...")
+                await asyncio.sleep(delay)
+                
+                # 执行自动重启(无限制)
+                self.logger.info("执行日志空闲触发的自动重启...")
+                
+                try:
+                    # 重置关闭模式,允许重新连接
+                    if hasattr(self, 'command_handlers'):
+                        await self.command_handlers._reset_shutdown_mode()
+                    if hasattr(self, 'connection_manager'):
+                        await self.connection_manager.reset_shutdown_mode()
+                    
+                    # 执行启动
+                    await self._start_server_process(websocket, group_id)
+                    
+                    self.logger.info("服务器自动重启成功")
+                    
+                except Exception as e:
+                    self.logger.error(f"自动重启失败: {e}", exc_info=True)
+                    
+                    if self.current_connection and not self.current_connection.closed:
+                        failed_msg = "服务器自动重启失败,将在{}秒后重新尝试...".format(
+                            self.config_manager.get_crash_restart_delay()
+                        )
+                        for group_id in self.allowed_groups:
+                            await self.send_group_message(self.current_connection, group_id, failed_msg)
+                    
+                    self.server_process = None
+                    self._close_log_file()
+                
+                return  # 返回,避免执行后续的异常停止逻辑
+            
+            # ============ 异常停止检测和自动重启 ============
+            is_normal_stop = return_code == 0
+            should_auto_restart = (
+                self.config_manager and 
+                self.config_manager.is_auto_restart_on_crash_enabled() and
+                not is_normal_stop  # 异常停止(非零返回码)
+            )
+            
+            if should_auto_restart:
+                self.logger.warning(f"检测到服务器异常停止(返回码: {return_code}),准备自动重启...")
+                
+                # 发送通知消息
+                if self.current_connection and not self.current_connection.closed:
+                    crash_msg = "检测到服务器异常停止,正在自动重启..."
+                    for group_id in self.allowed_groups:
+                        await self.send_group_message(self.current_connection, group_id, crash_msg)
+                
+                # 等待重启延迟
+                delay = self.config_manager.get_crash_restart_delay()
+                self.logger.info(f"等待{delay}秒后进行重启...")
+                await asyncio.sleep(delay)
+                
+                # 执行自动重启(无限制)
+                self.logger.info("执行自动重启...")
+                
+                try:
+                    # 重置关闭模式,允许重新连接
+                    if hasattr(self, 'command_handlers'):
+                        await self.command_handlers._reset_shutdown_mode()
+                    if hasattr(self, 'connection_manager'):
+                        await self.connection_manager.reset_shutdown_mode()
+                    
+                    # 执行启动
+                    await self._start_server_process(websocket, group_id)
+                    
+                    self.logger.info("服务器自动重启成功")
+                    
+                except Exception as e:
+                    self.logger.error(f"自动重启失败: {e}", exc_info=True)
+                    
+                    if self.current_connection and not self.current_connection.closed:
+                        failed_msg = "服务器自动重启失败,将在{}秒后重新尝试...".format(
+                            self.config_manager.get_crash_restart_delay()
+                        )
+                        for group_id in self.allowed_groups:
+                            await self.send_group_message(self.current_connection, group_id, failed_msg)
+                    
+                    self.server_process = None
+                    self._close_log_file()
+                
+                return  # 返回,避免执行后续的正常停止逻辑
+            
+            # ============ 正常停止处理 ============
             # 服务器停止时关闭所有连接
             if hasattr(self, 'command_handlers'):
                 await self.command_handlers._close_all_connections()

@@ -3,6 +3,8 @@ import logging
 import os
 import re
 import asyncio
+import importlib.util
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
@@ -1629,10 +1631,6 @@ class CommandHandlers:
             lines.append("\n使用提示:")
             lines.append("• 使用 'plugins <插件名>' 查看单个插件的详细帮助")
             lines.append("• 支持使用插件文件名或显示名称进行搜索")
-            lines.append("• 示例:")
-            lines.append("  - plugins chunk_deleter  (使用文件名)")
-            lines.append("  - plugins 'Chunk Deleter' (使用显示名称)")
-            lines.append("  - plugins chunk          (使用部分名称)")
             
             return "\n".join(lines)
             
@@ -1662,7 +1660,8 @@ class CommandHandlers:
     async def handle_reload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
         """处理reload_plugin命令(管理员) - 重新加载插件"""
         try:
-            if not self.config_manager.is_admin(user_id):
+            from_console = kwargs.get('from_console', False)
+            if not from_console and not self.config_manager.is_admin(user_id):
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:

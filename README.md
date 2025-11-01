@@ -216,6 +216,13 @@ server:
   working_directory: ""
   # 服务器启动超时时间（秒）
   startup_timeout: 300
+  # 服务器异常停止后是否自动启动，手动kill指令不受此影响
+  auto_restart_on_crash: false
+  # 异常停止重启延迟(秒)
+  crash_restart_delay: 10
+  # 日志多久没更新就自动重启(秒),0为关闭此功能
+  # 如果设置为300,表示300秒(5分钟)内MC服务端日志没有更新则自动重启
+  log_idle_restart_timeout: 0
 
 # 命令配置
 commands:

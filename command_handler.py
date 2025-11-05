@@ -373,8 +373,16 @@ class CommandHandlers:
         try:
             client_type, client = await self.qq_server.connection_manager.get_preferred_client()
             
+            # 如果没有连接，尝试自动重连一次
             if not client:
-                return "服务器连接未就绪\n请使用 #reconnect 手动重连"
+                self.logger.info("检测到连接未就绪，尝试自动重连...")
+                await self.qq_server.connection_manager.reconnect_all()
+                
+                # 重连后再次获取客户端
+                client_type, client = await self.qq_server.connection_manager.get_preferred_client()
+                
+                if not client:
+                    return "服务器连接未就绪\n自动重连失败，请使用 reconnect 手动重连"
             
             try:
                 if client_type == 'msmp':
@@ -408,8 +416,16 @@ class CommandHandlers:
 
             client_type, client = await self.qq_server.connection_manager.get_client_for_command("tps")
             
+            # 如果没有RCON连接，尝试自动重连一次
             if not client or client_type != 'rcon':
-                return "TPS命令需要RCON连接\n请使用 #reconnect_rcon 重连"
+                self.logger.info("检测到RCON连接未就绪，尝试自动重连...")
+                await self.qq_server.connection_manager.reconnect_rcon()
+                
+                # 重连后再次获取客户端
+                client_type, client = await self.qq_server.connection_manager.get_client_for_command("tps")
+                
+                if not client or client_type != 'rcon':
+                    return "TPS命令需要RCON连接\n自动重连失败，请使用 reconnect_rcon 重连"
             
             tps_command = self.config_manager.get_tps_command()
             result = client.execute_command(tps_command)
@@ -455,11 +471,10 @@ class CommandHandlers:
                 return "\n".join(message_lines)
             else:
                 return "TPS命令执行成功,但无返回结果"
-                    
+                
         except Exception as e:
             self.logger.error(f"执行TPS命令失败: {e}", exc_info=True)
             return f"获取TPS信息失败: {e}"
-
 
     def _extract_tps_value(self, text: str) -> Optional[float]:
         """从服务器返回的文本中提取TPS值"""
@@ -1665,7 +1680,7 @@ class CommandHandlers:
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
-                return "用法: #reload_plugin <插件名称或显示名称>"
+                return "用法: reload_plugin <插件名称或显示名称>"
             
             search_name = command_text.strip()
             
@@ -1676,7 +1691,7 @@ class CommandHandlers:
             if not plugin:
                 return f"未找到插件: {search_name}"
             
-            # 获取插件的实际文件名
+            # 获取插件的实际文件名（支持子目录）
             plugin_filename = None
             for filename, plugin_obj in self.qq_server.plugin_manager.plugins.items():
                 if plugin_obj == plugin:
@@ -1686,6 +1701,7 @@ class CommandHandlers:
             if not plugin_filename:
                 return f"无法确定插件的文件名: {search_name}"
             
+            # 使用插件管理器重新加载
             success = await self.qq_server.plugin_manager.reload_plugin(plugin_filename)
             
             if success:
@@ -1697,7 +1713,6 @@ class CommandHandlers:
             self.logger.error(f"执行reload_plugin命令失败: {e}", exc_info=True)
             return f"重载插件失败: {e}"
 
-
     async def handle_unload_plugin(self, user_id: int, command_text: str = "", **kwargs) -> str:
         """处理unload_plugin命令(管理员) - 卸载插件"""
         try:
@@ -1707,7 +1722,7 @@ class CommandHandlers:
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
-                return "用法: #unload_plugin <插件名称或显示名称>"
+                return "用法: unload_plugin <插件名称或显示名称>"
             
             search_name = command_text.strip()
             
@@ -1732,7 +1747,7 @@ class CommandHandlers:
                         f"当前已加载的插件: {', '.join(available_plugins)}"
                     )
             
-            # 获取插件的实际文件名
+            # 获取插件的实际文件名（支持子目录）
             plugin_filename = None
             for filename, plugin_obj in self.qq_server.plugin_manager.plugins.items():
                 if plugin_obj == plugin:
@@ -1762,7 +1777,7 @@ class CommandHandlers:
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
-                return "用法: #load_plugin <插件名称或显示名称>"
+                return "用法: load_plugin <插件名称或显示名称>"
             
             search_name = command_text.strip()
             
@@ -1790,33 +1805,41 @@ class CommandHandlers:
                 else:
                     return f"插件 '{existing_plugin.name}' 已经加载"
             
-            # 检查插件文件是否存在（支持多种查找方式）
+            # 使用插件管理器的扫描功能查找插件文件
             plugin_file = None
-            plugin_dir = Path(self.qq_server.plugin_manager.plugin_dir)
+            plugin_filename = None
             
-            # 1. 直接按文件名查找
-            potential_files = [
-                plugin_dir / f"{search_name}.py",
-                plugin_dir / f"{search_name.lower()}.py",
-                plugin_dir / f"{search_name.replace(' ', '_')}.py",
-                plugin_dir / f"{search_name.replace(' ', '_').lower()}.py"
-            ]
-            
-            for file_path in potential_files:
-                if file_path.exists():
+            # 遍历所有可能的插件文件
+            plugin_files = list(self.qq_server.plugin_manager.plugin_dir.rglob("*.py"))
+            for file_path in plugin_files:
+                if file_path.name.startswith("_"):
+                    continue
+                
+                # 检查文件名是否匹配（不含.py）
+                file_stem = file_path.stem
+                relative_path = file_path.relative_to(self.qq_server.plugin_manager.plugin_dir)
+                
+                # 移除.py后缀的完整相对路径（用于模块名）
+                module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
+                
+                # 检查是否匹配搜索名称
+                if (search_name.lower() == file_stem.lower() or 
+                    search_name.lower() == module_name.lower()):
                     plugin_file = file_path
+                    plugin_filename = module_name
                     break
             
-            # 2. 如果直接查找失败，尝试在所有插件文件中搜索匹配的名称
+            # 如果直接匹配失败，尝试在所有插件文件中搜索匹配的名称
             if not plugin_file:
-                all_plugin_files = list(plugin_dir.glob("*.py"))
-                for file_path in all_plugin_files:
+                for file_path in plugin_files:
                     if file_path.name.startswith("_"):
                         continue
                     
                     # 尝试加载模块并检查插件名称
                     try:
-                        module_name = file_path.stem
+                        relative_path = file_path.relative_to(self.qq_server.plugin_manager.plugin_dir)
+                        module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
+                        
                         spec = importlib.util.spec_from_file_location(module_name, file_path)
                         if spec and spec.loader:
                             module = importlib.util.module_from_spec(spec)
@@ -1838,6 +1861,7 @@ class CommandHandlers:
                                 if (search_name.lower() in temp_plugin.name.lower() or 
                                     search_name.lower() in module_name.lower()):
                                     plugin_file = file_path
+                                    plugin_filename = module_name
                                     break
                     except Exception:
                         continue
@@ -1845,9 +1869,11 @@ class CommandHandlers:
             if not plugin_file:
                 # 列出所有可用的插件文件
                 available_files = []
-                for file_path in plugin_dir.glob("*.py"):
+                for file_path in self.qq_server.plugin_manager.plugin_dir.rglob("*.py"):
                     if not file_path.name.startswith("_"):
-                        available_files.append(file_path.stem)
+                        relative_path = file_path.relative_to(self.qq_server.plugin_manager.plugin_dir)
+                        module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
+                        available_files.append(module_name)
                 
                 if available_files:
                     return (
@@ -1858,7 +1884,6 @@ class CommandHandlers:
                     return f"未找到插件文件: {search_name}，插件目录为空"
             
             # 尝试加载插件
-            plugin_filename = plugin_file.stem
             success = await self.qq_server.plugin_manager.load_plugin(plugin_filename)
             
             if success:
@@ -1877,7 +1902,7 @@ class CommandHandlers:
                     return f"插件 '{loaded_plugin.name}' (文件: {plugin_filename}) 已加载（状态报告异常）"
                 else:
                     return f"插件 '{search_name}' 加载失败，请检查插件文件是否正确"
-                    
+                        
         except Exception as e:
             self.logger.error(f"执行load_plugin命令失败: {e}", exc_info=True)
             return f"加载插件失败: {e}"

@@ -703,7 +703,7 @@ class QQBotWebSocketServer:
                 
                 return
             
-            # ③ 最后检查普通命令（help, list, tps等）
+            # ③ 最后检查普通命令（help, list, tps等）和插件命令
             if self.command_handler:
                 try:
                     parts = raw_message.split(maxsplit=1)
@@ -744,10 +744,14 @@ class QQBotWebSocketServer:
             if should_log:
                 self.logger.info(f"收到私聊消息 - 用户: {user_id}, 内容: {raw_message}")
             
-            if not self.config_manager.is_admin(user_id):
-                return
+            # 私聊模式下，首先检查是否是管理员
+            is_admin = self.config_manager.is_admin(user_id)
             
+            # ① 处理 ! 开头的服务器命令（仅管理员）
             if raw_message.startswith('!'):
+                if not is_admin:
+                    return
+                
                 server_command = raw_message[1:].strip()
                 if not server_command:
                     await self.send_private_message(websocket, user_id, "命令不能为空")
@@ -773,16 +777,30 @@ class QQBotWebSocketServer:
                 
                 return
             
+            # ② 处理普通命令和插件命令（私聊）
             if self.command_handler:
                 try:
+                    parts = raw_message.split(maxsplit=1)
+                    base_command = parts[0].lower() if parts else ""
+                    command_args = parts[1] if len(parts) > 1 else ""
+                    
+                    if not base_command:
+                        return
+                    
+                    # 调用命令处理器，处理插件命令和内置命令
                     result = await asyncio.wait_for(
                         self.command_handler.handle_command(
-                            command_text=raw_message,
+                            command_text=base_command,
+                            command_args=command_args,
                             user_id=user_id,
-                            group_id=0,
+                            group_id=0,  # 私聊时群组ID为0
                             websocket=websocket,
                             msmp_client=self.msmp_client,
-                            is_private=True
+                            config_manager=self.config_manager,
+                            rcon_client=self.rcon_client,
+                            plugin_manager=self.plugin_manager,
+                            connection_manager=self.connection_manager,
+                            is_private=True  # 标记为私聊模式
                         ),
                         timeout=30.0
                     )

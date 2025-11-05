@@ -1,6 +1,7 @@
 """
 MSMP_QQBot 插件管理系统
 支持动态加载、卸载和热重载插件
+支持子目录结构
 """
 
 import os
@@ -10,6 +11,9 @@ import importlib.util
 import asyncio
 import time
 import nbtlib
+import json
+import aiohttp
+from openai import AsyncOpenAI
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Set
 from abc import ABC, abstractmethod
@@ -89,7 +93,7 @@ class BotPlugin(ABC):
     
 
 class PluginManager:
-    """插件管理器 - 支持热加载"""
+    """插件管理器 - 支持热加载和子目录结构"""
     
     def __init__(self, plugin_dir: str = "plugins", logger: logging.Logger = None):
         """
@@ -106,6 +110,7 @@ class PluginManager:
         self.command_handlers: Dict[str, Callable] = {}
         self.event_listeners: Dict[str, List[Callable]] = {}
         self.loaded_files: Set[str] = set()  # 记录已加载的文件
+        self.plugin_file_paths: Dict[str, Path] = {}  # 记录插件的完整文件路径
         
         # 创建插件目录
         self.plugin_dir.mkdir(exist_ok=True)
@@ -117,13 +122,13 @@ class PluginManager:
         self.logger.info(f"插件管理器已初始化, 插件目录: {self.plugin_dir.absolute()}")
     
     async def load_plugins(self):
-        """扫描并加载所有插件"""
+        """扫描并加载所有插件（包括子目录）"""
         if not self.plugin_dir.exists():
             self.logger.warning(f"插件目录不存在: {self.plugin_dir}")
             return
         
-        # 扫描所有 .py 文件
-        plugin_files = list(self.plugin_dir.glob("*.py"))
+        # 递归扫描所有 .py 文件（包括子目录）
+        plugin_files = list(self.plugin_dir.rglob("*.py"))
         
         if not plugin_files:
             self.logger.info("未发现任何插件")
@@ -133,7 +138,7 @@ class PluginManager:
         
         for plugin_file in plugin_files:
             # 跳过 __init__.py 和以 _ 开头的文件
-            if plugin_file.name.startswith("_"):
+            if plugin_file.name.startswith("_") or plugin_file.name == "__init__.py":
                 continue
             
             await self._load_plugin_file(plugin_file)
@@ -141,8 +146,12 @@ class PluginManager:
     async def _load_plugin_file(self, plugin_file: Path) -> bool:
         """加载单个插件文件"""
         try:
-            module_name = plugin_file.stem
-            self.logger.info(f"正在加载插件: {module_name}")
+            # 生成模块名：将文件路径转换为模块路径
+            # 例如: plugins/whitelist_audit/whitelist_audit.py -> whitelist_audit.whitelist_audit
+            relative_path = plugin_file.relative_to(self.plugin_dir)
+            module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
+            
+            self.logger.info(f"正在加载插件: {module_name} (文件: {plugin_file})")
             
             # 如果模块已加载，先卸载
             if module_name in sys.modules:
@@ -174,9 +183,10 @@ class PluginManager:
             if success:
                 self.plugins[module_name] = plugin_instance
                 self.plugin_modules[module_name] = module
+                self.plugin_file_paths[module_name] = plugin_file
                 self.loaded_files.add(str(plugin_file.absolute()))
                 self.logger.info(f"插件加载成功: {plugin_instance.name} v{plugin_instance.version} (作者: {plugin_instance.author})")
-                return True  # 明确返回 True
+                return True
             else:
                 self.logger.error(f"插件加载失败: {module_name}")
                 return False
@@ -213,6 +223,7 @@ class PluginManager:
         
         self.plugins.clear()
         self.plugin_modules.clear()
+        self.plugin_file_paths.clear()
         self.command_handlers.clear()
         self.event_listeners.clear()
         self.loaded_files.clear()
@@ -236,13 +247,18 @@ class PluginManager:
         重新加载指定插件
         
         Args:
-            plugin_name: 插件名称（文件名，不含.py后缀）
+            plugin_name: 插件名称（模块名，如 whitelist_audit.whitelist_audit）
             
         Returns:
             bool: 重载是否成功
         """
         try:
-            plugin_file = self.plugin_dir / f"{plugin_name}.py"
+            # 检查插件文件路径是否存在
+            if plugin_name not in self.plugin_file_paths:
+                self.logger.error(f"插件文件路径未找到: {plugin_name}")
+                return False
+            
+            plugin_file = self.plugin_file_paths[plugin_name]
             
             if not plugin_file.exists():
                 self.logger.error(f"插件文件不存在: {plugin_file}")
@@ -289,7 +305,7 @@ class PluginManager:
         卸载指定插件
         
         Args:
-            plugin_name: 插件名称
+            plugin_name: 插件名称（模块名）
             
         Returns:
             bool: 卸载是否成功
@@ -314,8 +330,9 @@ class PluginManager:
             await self._unload_plugin_module(plugin_name)
             
             # 从已加载文件列表中移除
-            plugin_file = self.plugin_dir / f"{plugin_name}.py"
-            self.loaded_files.discard(str(plugin_file.absolute()))
+            if plugin_name in self.plugin_file_paths:
+                self.loaded_files.discard(str(self.plugin_file_paths[plugin_name].absolute()))
+                del self.plugin_file_paths[plugin_name]
             
             self.logger.info(f"插件已卸载: {plugin_name}")
             return True
@@ -361,16 +378,28 @@ class PluginManager:
         加载指定插件
         
         Args:
-            plugin_name: 插件名称（文件名，不含.py后缀）
+            plugin_name: 插件名称（模块名，如 whitelist_audit.whitelist_audit）
             
         Returns:
             bool: 加载是否成功
         """
         try:
-            plugin_file = self.plugin_dir / f"{plugin_name}.py"
+            # 查找对应的插件文件
+            plugin_file = None
+            for file_path in self.plugin_dir.rglob("*.py"):
+                if file_path.name.startswith("_"):
+                    continue
+                
+                # 生成模块名进行比较
+                relative_path = file_path.relative_to(self.plugin_dir)
+                file_module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
+                
+                if file_module_name == plugin_name:
+                    plugin_file = file_path
+                    break
             
-            if not plugin_file.exists():
-                self.logger.error(f"插件文件不存在: {plugin_file}")
+            if not plugin_file:
+                self.logger.error(f"插件文件未找到: {plugin_name}")
                 return False
             
             return await self._load_plugin_file(plugin_file)

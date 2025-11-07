@@ -23,8 +23,8 @@ class QQBotWebSocketServer:
     """
     
     def __init__(self, port: int, allowed_groups: List[int], msmp_client, logger: logging.Logger, 
-             access_token: str = "", config_manager=None, rcon_client=None, connection_manager=None,
-             plugin_manager=None):
+         access_token: str = "", config_manager=None, rcon_client=None, connection_manager=None,
+         plugin_manager=None):
         """
         初始化 QQBotWebSocketServer
         
@@ -48,7 +48,8 @@ class QQBotWebSocketServer:
         self.config_manager = config_manager
         self.connection_manager = connection_manager
         self.plugin_manager = plugin_manager
-        
+        self.logger.info(f"插件管理器已设置: {plugin_manager is not None}")
+
         self.current_connection = None
         self.server = None
         self.connected_clients = set()
@@ -1649,6 +1650,13 @@ class QQBotWebSocketServer:
                     await self.send_group_message(self.current_connection, group_id, message)
                 
                 self.logger.info("服务器启动完成")
+
+                # 触发插件事件
+                if hasattr(self, 'plugin_manager') and self.plugin_manager:
+                    self.logger.debug("触发 server_started 事件给所有插件")
+                    await self.plugin_manager.trigger_event("server_started")
+                else:
+                    self.logger.warning("无法触发插件事件: plugin_manager 未设置")
                 
                 # 确保关闭模式已重置
                 if hasattr(self, 'command_handlers'):

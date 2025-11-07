@@ -853,17 +853,22 @@ class PluginManager:
             
         Returns:
             日志行列表，最新的日志在后
-            
-        示例:
-            logs = plugin_manager.get_server_logs(20)
-            for log in logs:
-                print(log)
         """
         if not self.qq_server:
-            self.logger.warning("QQ服务器实例未初始化，无法获取服务端日志")
+            self.logger.debug("QQ服务器实例未初始化，无法获取服务端日志")
             return []
         
         try:
+            # 检查服务器是否在运行
+            if not hasattr(self.qq_server, 'server_process') or not self.qq_server.server_process:
+                self.logger.debug("服务器进程未运行")
+                return []
+                
+            # 检查进程状态
+            if (self.qq_server.server_process.poll() is not None):
+                self.logger.debug("服务器进程已停止")
+                return []
+                
             return self.qq_server.get_recent_logs(lines)
         except Exception as e:
             self.logger.error(f"获取服务端日志失败: {e}")

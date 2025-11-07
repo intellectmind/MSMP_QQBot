@@ -862,6 +862,12 @@ class CommandHandlers:
             else:
                 await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
             
+            # ============ 触发服务器停止事件 ============
+            if hasattr(self.qq_server, 'plugin_manager') and self.qq_server.plugin_manager:
+                self.logger.info("触发 server_stopping 事件给所有插件")
+                await self.qq_server.plugin_manager.trigger_event("server_stopping")
+            # ============ 事件触发结束 ============
+            
             # 第一步：立即设置服务器停止标志，停止日志采集
             self.qq_server.server_stopping = True
             
@@ -1309,6 +1315,12 @@ class CommandHandlers:
             if self.qq_server.server_process.poll() is not None:
                 return "服务器进程已经停止"
             
+            # ============ 触发服务器停止事件 ============
+            if hasattr(self.qq_server, 'plugin_manager') and self.qq_server.plugin_manager:
+                self.logger.info("触发 server_stopping 事件给所有插件 (kill命令)")
+                await self.qq_server.plugin_manager.trigger_event("server_stopping")
+            # ============ 事件触发结束 ============
+            
             # 设置手动kill标记
             self.qq_server._manual_kill = True
 
@@ -1540,7 +1552,7 @@ class CommandHandlers:
             return f"获取网络信息失败: {e}"
 
     async def handle_plugins(self, command_text: str = "", **kwargs) -> str:
-        """处理 plugins 命令 - 显示已加载的插件及其指令，支持查看单个插件详情"""
+        """处理 plugins 命令 - 显示已加载的插件及其指令，支持查看单个插件详情和分页"""
         try:
             if not self.qq_server or not hasattr(self.qq_server, 'plugin_manager'):
                 return "插件管理器未初始化"
@@ -1554,6 +1566,11 @@ class CommandHandlers:
             # 如果有参数，显示单个插件的详细帮助
             if command_text:
                 search_name = command_text.strip()
+                
+                # 检查是否是页码参数
+                if search_name.isdigit():
+                    page_num = int(search_name)
+                    return await self._get_plugins_page(plugins, page_num)
                 
                 # 使用新的查找方法
                 plugin = plugin_manager.find_plugin_by_name(search_name)
@@ -1602,15 +1619,40 @@ class CommandHandlers:
                     # 如果插件没有 get_plugin_help 方法，显示基本信息
                     return self._format_plugin_basic_info(plugin, plugin_filename)
             
-            # 没有参数时，显示所有插件列表（原有逻辑）
+            # 没有参数时，显示第一页
+            return await self._get_plugins_page(plugins, 1)
+            
+        except Exception as e:
+            self.logger.error(f"处理 plugins 命令失败: {e}", exc_info=True)
+            return f"获取插件信息失败: {e}"
+
+    async def _get_plugins_page(self, plugins: Dict, page_num: int, plugins_per_page: int = 2) -> str:
+        """获取指定页的插件列表"""
+        try:
+            # 计算分页信息
+            plugin_list = list(plugins.items())
+            total_plugins = len(plugin_list)
+            total_pages = (total_plugins + plugins_per_page - 1) // plugins_per_page
+            
+            # 验证页码
+            if page_num < 1 or page_num > total_pages:
+                return f"页码无效，请输入 1-{total_pages} 之间的数字"
+            
+            # 计算当前页的起始和结束索引
+            start_idx = (page_num - 1) * plugins_per_page
+            end_idx = min(start_idx + plugins_per_page, total_plugins)
+            
+            # 构建页面内容
             lines = [
-                "已加载的插件信息",
-                "=" * 20,
-                f"总数: {len(plugins)} 个\n"
+                f"已加载的插件信息 (第 {page_num}/{total_pages} 页)",
+                "=" * 10,
+                f"总数: {total_plugins} 个插件\n"
             ]
             
-            # 遍历所有插件并显示基本信息
-            for plugin_name, plugin in plugins.items():
+            # 显示当前页的插件
+            for i in range(start_idx, end_idx):
+                plugin_name, plugin = plugin_list[i]
+                
                 lines.append(f"【{plugin.name}】v{plugin.version}")
                 lines.append(f"文件: {plugin_name}.py")
                 lines.append(f"作者: {plugin.author}")
@@ -1619,7 +1661,7 @@ class CommandHandlers:
                 
                 # 显示插件注册的命令
                 plugin_cmds = []
-                for cmd_name, cmd_info in plugin_manager.command_handlers.items():
+                for cmd_name, cmd_info in self.qq_server.plugin_manager.command_handlers.items():
                     handler = cmd_info.get('handler')
                     # 检查处理器是否属于当前插件
                     if handler and hasattr(handler, '__self__'):
@@ -1629,7 +1671,7 @@ class CommandHandlers:
                             admin_only = cmd_info.get('admin_only', False)
                             
                             if names:
-                                cmd_line = f"  • {' / '.join(names)}"
+                                cmd_line = f"  • {' / '.join(names[:3])}"  # 最多显示3个别名
                                 if description:
                                     cmd_line += f" - {description}"
                                 if admin_only:
@@ -1638,20 +1680,36 @@ class CommandHandlers:
                 
                 if plugin_cmds:
                     lines.append("插件命令:")
-                    lines.extend(plugin_cmds)
+                    lines.extend(plugin_cmds[:5])  # 最多显示5个命令
                 
-                lines.append("-" * 20)
+                if i < end_idx - 1:  # 不是最后一个插件时添加分隔线
+                    lines.append("-" * 10)
+            
+            # 添加分页导航
+            lines.append("\n" + "=" * 10)
+            lines.append("分页导航:")
+            
+            if total_pages > 1:
+                nav_lines = []
+                if page_num > 1:
+                    nav_lines.append(f"• 上一页: plugins {page_num - 1}")
+                if page_num < total_pages:
+                    nav_lines.append(f"• 下一页: plugins {page_num + 1}")
+                
+                if nav_lines:
+                    lines.extend(nav_lines)
             
             # 添加使用提示
             lines.append("\n使用提示:")
             lines.append("• 使用 'plugins <插件名>' 查看单个插件的详细帮助")
+            lines.append("• 使用 'plugins <页码>' 查看指定页的插件列表")
             lines.append("• 支持使用插件文件名或显示名称进行搜索")
             
             return "\n".join(lines)
             
         except Exception as e:
-            self.logger.error(f"处理 plugins 命令失败: {e}", exc_info=True)
-            return f"获取插件信息失败: {e}"
+            self.logger.error(f"生成插件分页失败: {e}", exc_info=True)
+            return f"生成插件列表失败: {e}"
 
     def _format_plugin_basic_info(self, plugin, plugin_filename: str = None) -> str:
         """格式化插件基本信息"""

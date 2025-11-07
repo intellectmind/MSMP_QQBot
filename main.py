@@ -383,6 +383,12 @@ class ConsoleCommandHandler:
                 return "qq_server 或 command_handlers 未初始化"
             
             print("正在停止Minecraft服务器...")
+
+            # ============ 触发服务器停止事件 ============
+            if hasattr(self.bot.qq_server, 'plugin_manager') and self.bot.qq_server.plugin_manager:
+                self.logger.info("触发 server_stopping 事件给所有插件 (控制台stop)")
+                await self.bot.qq_server.plugin_manager.trigger_event("server_stopping")
+            # ============ 事件触发结束 ============
             
             # 使用统一的停止方法，添加 from_console 标志
             result = await self.bot.qq_server.command_handlers.handle_stop(
@@ -722,6 +728,9 @@ class MsmpQQBot(ServerEventListener):
             await self.qq_server.start()
             self.logger.info("QQ机器人服务器已启动")
             
+            self.plugin_manager.qq_server = self.qq_server
+            self.logger.info("已设置插件管理器的 QQServer 引用")
+            
             # 加载所有插件
             self.logger.info("=" * 60)
             self.logger.info("正在加载插件...")
@@ -892,6 +901,16 @@ class MsmpQQBot(ServerEventListener):
         """服务器启动事件"""
         self.logger.info("Minecraft服务器已启动")
         
+        # 触发插件事件
+        if self.plugin_manager:
+            self.logger.debug("触发 server_started 事件给所有插件")
+            asyncio.run_coroutine_threadsafe(
+                self.plugin_manager.trigger_event("server_started"),
+                self.loop
+            )
+        else:
+            self.logger.warning("plugin_manager 为 None，无法触发事件")
+        
         if self.config_manager.is_server_event_notify_enabled() and self.qq_server and self.qq_server.is_connected():
             try:
                 asyncio.run_coroutine_threadsafe(
@@ -900,10 +919,18 @@ class MsmpQQBot(ServerEventListener):
                 )
             except Exception as e:
                 self.logger.error(f"发送服务器启动通知失败: {e}", exc_info=True)
-    
+
     def on_server_stopping(self, params: dict):
         """服务器停止事件"""
         self.logger.info("Minecraft服务器正在停止")
+        
+        # 触发插件事件
+        if self.plugin_manager:
+            self.logger.debug("触发 server_stopping 事件给所有插件")
+            asyncio.run_coroutine_threadsafe(
+                self.plugin_manager.trigger_event("server_stopping"),
+                self.loop
+            )
         
         if self.config_manager.is_server_event_notify_enabled() and self.qq_server and self.qq_server.is_connected():
             try:
@@ -913,12 +940,20 @@ class MsmpQQBot(ServerEventListener):
                 )
             except Exception as e:
                 self.logger.error(f"发送服务器停止通知失败: {e}", exc_info=True)
-    
+
     def on_player_join(self, params: dict):
         """玩家加入事件"""
         player_name = params.get('name', 'Unknown')
         self.logger.info(f"玩家加入: {player_name}")
         
+        # 触发插件事件
+        if self.plugin_manager:
+            self.logger.debug(f"触发 player_join 事件给所有插件: {player_name}")
+            asyncio.run_coroutine_threadsafe(
+                self.plugin_manager.trigger_event("player_join", player_name),
+                self.loop
+            )
+
         if self.config_manager.is_player_event_notify_enabled() and self.qq_server and self.qq_server.is_connected():
             message = f"{player_name} 加入了游戏"
             try:
@@ -928,12 +963,20 @@ class MsmpQQBot(ServerEventListener):
                 )
             except Exception as e:
                 self.logger.error(f"发送玩家加入通知失败: {e}", exc_info=True)
-    
+
     def on_player_leave(self, params: dict):
         """玩家离开事件"""
         player_name = params.get('name', 'Unknown')
         self.logger.info(f"玩家离开: {player_name}")
         
+        # 触发插件事件
+        if self.plugin_manager:
+            self.logger.debug(f"触发 player_leave 事件给所有插件: {player_name}")
+            asyncio.run_coroutine_threadsafe(
+                self.plugin_manager.trigger_event("player_leave", player_name),
+                self.loop
+            )
+
         if self.config_manager.is_player_event_notify_enabled() and self.qq_server and self.qq_server.is_connected():
             message = f"{player_name} 离开了游戏"
             try:

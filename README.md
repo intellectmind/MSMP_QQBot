@@ -2,9 +2,11 @@
 
 [夸克下载链接](https://pan.quark.cn/s/ae82cd4320dc?pwd=CyXJ)
 
+<img width="2560" height="1528" alt="gui" src="https://github.com/user-attachments/assets/82610b08-8850-476a-94db-d3a63948ce64" />
+
 支持我的世界1.21.9+新加入的服务端管理协议MSMP和RCON的QQ机器人（1.21.9以下版本可单独使用RCON）。支持QQ启动/停止服务器，查询在线人数及玩家ID、服务器状态、执行命令等功能
 
-配置文件可自动热重载（有修改保存就自动重载）
+支持多服务器管理，GUI界面，配置文件可自动热重载（有修改保存就自动重载）
 
 拥有强大的自定义服务端监听器和自定义指令监听器，详见[wiki](https://github.com/intellectmind/MSMP_QQBot/wiki)
 
@@ -14,10 +16,9 @@
 #### 启动方式1：独立启动我的世界服务端后启动MSMP_QQBot（即外部接入），此方式部分功能将不可用
 #### 启动方式2（推荐）：使用`#start`命令启动或者使用QQ机器人（start命令）启动服务端，此时MSMP_QQBot控制台会捕获服务端控制台输出，并且仍然支持向服务端输入命令  
       
-#### window用户：直接下载`releases`中的`MSMP_QQBot.exe`和`config.yml`，修改配置后，双击运行即可  
+#### window用户：直接下载`[夸克下载链接](https://pan.quark.cn/s/ae82cd4320dc?pwd=CyXJ)`，双击运行即可  
 #### Linux等其它用户可下载源代码运行  
 
-> 注意：`start_script`和`working_directory`的路径不能使用`\`，而是用`/`，参考："G:/1.21.9/start.bat"  
 > 启动命令`start.bat`参考`"G:\jdk-21.0.5\bin\java.exe" -Xmx8G -jar paper-1.21.10-69.jar nogui`，可以不用加UTF-8编码这些  
 
 ----------------------------------------------------------------------------------------------------------
@@ -29,12 +30,6 @@
 [可在此下载插件](https://github.com/intellectmind/MSMP_QQBot-Plugins)
 
 [MSMP_QQBot-插件开发者文档](https://github.com/intellectmind/MSMP_QQBot/wiki/MSMP_QQBot-插件开发者文档)
-
-----------------------------------------------------------------------------------------------------------
-
-## todo
-- 多服支持
-- web界面
 
 ----------------------------------------------------------------------------------------------------------
 

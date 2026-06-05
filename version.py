@@ -1,0 +1,3 @@
+APP_NAME = "MSMP_QQBot"
+APP_VERSION = "2.0.0"
+

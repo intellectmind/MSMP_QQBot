@@ -5,6 +5,7 @@ import threading
 import time
 import logging
 import hashlib
+import copy
 from typing import List, Dict, Optional, Callable, Any
 from pathlib import Path
 
@@ -13,6 +14,19 @@ class ConfigValidationError(Exception):
     pass
 
 class ConfigManager:
+    SERVER_REQUIRED_SECTIONS = (
+        'msmp',
+        'rcon',
+        'qq',
+        'server',
+        'commands',
+        'notifications',
+        'advanced',
+        'scheduled_tasks',
+        'custom_commands',
+        'custom_listeners',
+    )
+
     def __init__(self, config_path: str = "config.yml"):
         self.config_path = config_path
         self.config = {}
@@ -29,15 +43,32 @@ class ConfigManager:
         self._stop_monitor = False
         self._last_config_hash = self._get_config_hash()
         self._reload_lock = threading.RLock()
+        self._event_loop = None
         self.logger = logging.getLogger(__name__)
+
+    def set_event_loop(self, loop):
+        """设置用于异步配置重载回调的主事件循环。"""
+        self._event_loop = loop
     
     def _get_config_hash(self) -> str:
         """获取配置文件的哈希值，用于检测文件变化"""
+        digest = hashlib.md5()
         try:
             with open(self.config_path, 'rb') as f:
-                return hashlib.md5(f.read()).hexdigest()
+                digest.update(f.read())
         except Exception:
             return ""
+
+        try:
+            server_dir = self.get_server_config_dir()
+            if server_dir.exists():
+                for path in sorted([*server_dir.glob("*.yml"), *server_dir.glob("*.yaml")]):
+                    digest.update(str(path).encode('utf-8'))
+                    digest.update(path.read_bytes())
+        except Exception:
+            pass
+
+        return digest.hexdigest()
     
     def register_reload_callback(self, callback: Callable):
         """注册配置重载回调函数
@@ -105,6 +136,7 @@ class ConfigManager:
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     self.config = yaml.safe_load(f) or {}
+                self.config['_server_files'] = self._load_server_files()
             except yaml.YAMLError as e:
                 raise ConfigValidationError(f"配置文件YAML格式错误: {e}")
             except Exception as e:
@@ -112,133 +144,30 @@ class ConfigManager:
         else:
             self.config = self.get_default_config()
             self.save_config()
+            self.config['_server_files'] = self._load_server_files()
     
     def save_config(self):
         """保存配置文件"""
         try:
             with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(self.config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+                yaml.dump(self._public_config(), f, allow_unicode=True, default_flow_style=False, sort_keys=False)
         except Exception as e:
             raise ConfigValidationError(f"保存配置文件失败: {e}")
+
+    def _public_config(self) -> Dict[str, Any]:
+        """过滤运行期内部字段，避免写回 config.yml。"""
+        return {
+            key: value for key, value in self.config.items()
+            if not str(key).startswith('_')
+        }
     
     def get_default_config(self) -> Dict:
         """获取默认配置"""
         return {
-            'msmp': {
-                'enabled': False,
-                'host': 'localhost',
-                'port': 21111,
-                'password': 'your_msmp_password_here'
-            },
-            'rcon': {
-                'enabled': True,
-                'host': 'localhost',
-                'port': 25575,
-                'password': 'your_rcon_password_here'
-            },
             'websocket': {
                 'port': 8080,
                 'token': '',
                 'auth_enabled': False
-            },
-            'qq': {
-                'groups': [123456789],
-                'admins': [123456789],
-                'welcome_new_members': False,
-                'welcome_message': '欢迎新成员加入！输入 help 查看可用命令'
-            },
-            'server': {
-                'start_script': '',
-                'working_directory': '',
-                'startup_timeout': 300,
-                'auto_restart_on_crash': False,
-                'crash_restart_delay': 10,
-                'log_idle_restart_timeout': 0
-            },
-            'commands': {
-                'tps_command': 'tps',
-                'tps_regex': r'TPS from last 1m, 5m, 15m:\s*([\d.]+)',
-                'tps_group_index': 1,
-                'tps_show_raw_output': True,
-                'enabled_commands': {
-                    'list': True,
-                    'tps': True,
-                    'rules': True,
-                    'status': True,
-                    'help': True
-                },
-                'enabled_admin_commands': {
-                    'start': False,
-                    'stop': False,
-                    'kill': False,
-                    'reload': False,
-                    'log': False,
-                    'reconnect': False,
-                    'reconnect_msmp': False,
-                    'reconnect_rcon': False,
-                    'crash': False,
-                    'sysinfo': False,
-                    'disk': False,
-                    'process': False,
-                    'network': False,
-                    'listeners': False
-                }
-            },
-            'notifications': {
-                'server_events': True,
-                'player_events': False,
-                'log_messages': False,
-                'chunk_monitor': {
-                    'enabled': True,
-                    'notify_admins': True,
-                    'notify_groups': True
-                }
-            },
-            'advanced': {
-                'reconnect_interval': 300,
-                'heartbeat_interval': 30,
-                'command_cooldown': 3,
-                'max_message_length': 2500,
-                'player_list_cache_ttl': 5,
-                'max_server_logs': 100,
-            },
-            'scheduled_tasks': {
-                'enabled': False,
-                'auto_start': {
-                    'enabled': False,
-                    'times': ['08:00', '18:00'],
-                    'weekdays': [0, 1, 2, 3, 4, 5, 6],
-                    'pre_notify_seconds': 300,
-                    'notify_message': '服务器将在 {countdown} 秒后启动，请做好准备'
-                },
-                'auto_stop': {
-                    'enabled': False,
-                    'times': ['12:00', '23:59'],
-                    'weekdays': [0, 1, 2, 3, 4, 5, 6],
-                    'warning_before_seconds': 600,
-                    'first_warning': '服务器将在 {countdown} 秒后关闭，请保存游戏',
-                    'second_warning': '服务器即将在 1 分钟后关闭',
-                    'immediate_message': '服务器正在关闭',
-                },
-                'auto_restart': {
-                    'enabled': False,
-                    'times': ['04:00', '16:00'],
-                    'weekdays': [0, 1, 2, 3, 4, 5, 6],
-                    'warning_before_seconds': 600,
-                    'first_warning': '服务器将在 {countdown} 秒后重启，请保存游戏',
-                    'second_warning': '服务器即将在 1 分钟后重启',
-                    'immediate_message': '服务器正在重启',
-                    'wait_before_startup': 10,
-                    'restart_success_message': '服务器已重启，欢迎回来！'
-                }
-            },
-            'custom_commands': {
-                'enabled': False,
-                'rules': []
-            },
-            'custom_listeners': {
-                'enabled': False,
-                'rules': []
             },
             'debug': False
         }
@@ -246,87 +175,97 @@ class ConfigManager:
     def validate_config(self) -> List[str]:
         """验证配置文件"""
         errors = []
-        
-        msmp_enabled = self.is_msmp_enabled()
-        rcon_enabled = self.is_rcon_enabled()
-        
-        if not msmp_enabled and not rcon_enabled:
-            errors.append("必须至少启用MSMP或RCON其中一种连接方式")
-        
-        if msmp_enabled:
-            if not self.get_msmp_host():
-                errors.append("MSMP host 未配置")
-            
-            msmp_port = self.get_msmp_port()
-            if not (1024 <= msmp_port <= 65535):
-                errors.append(f"MSMP端口 {msmp_port} 无效(应在1024-65535之间)")
-            
-            if not self.get_msmp_password():
-                errors.append("MSMP password 未配置")
-            elif self.get_msmp_password() == 'your_msmp_password_here':
-                errors.append("MSMP password 仍使用默认值,请修改为实际密码")
-        
-        if rcon_enabled:
-            if not self.get_rcon_host():
-                errors.append("RCON host 未配置")
-            
-            rcon_port = self.get_rcon_port()
-            if not (1024 <= rcon_port <= 65535):
-                errors.append(f"RCON端口 {rcon_port} 无效(应在1024-65535之间)")
-            
-            if not self.get_rcon_password():
-                errors.append("RCON password 未配置")
-            elif self.get_rcon_password() == 'your_rcon_password_here':
-                errors.append("RCON password 仍使用默认值,请修改为实际密码")
-        
+
         ws_port = self.get_ws_port()
         if not (1024 <= ws_port <= 65535):
             errors.append(f"WebSocket端口 {ws_port} 无效(应在1024-65535之间)")
-        
-        if msmp_enabled and ws_port == self.get_msmp_port():
-            errors.append(f"WebSocket端口不能与MSMP端口相同 ({ws_port})")
-        
-        if rcon_enabled and ws_port == self.get_rcon_port():
-            errors.append(f"WebSocket端口不能与RCON端口相同 ({ws_port})")
-        
-        if not self.get_qq_groups():
-            errors.append("至少需要配置一个QQ群")
-        
-        for group_id in self.get_qq_groups():
-            if not isinstance(group_id, int) or group_id <= 0:
-                errors.append(f"无效的QQ群号: {group_id}")
-        
-        if not self.get_qq_admins():
-            errors.append("至少需要配置一个管理员QQ号")
-        
-        for admin_id in self.get_qq_admins():
-            if not isinstance(admin_id, int) or admin_id <= 0:
-                errors.append(f"无效的管理员QQ号: {admin_id}")
-        
-        start_script = self.get_server_start_script()
-        if start_script:
-            if not (start_script.endswith('.bat') or start_script.endswith('.sh')):
-                errors.append(f"服务器启动脚本格式不支持: {start_script}(仅支持.bat或.sh)")
-        
-        commands_config = self.config.get('commands', {})
-        
-        enabled_commands = commands_config.get('enabled_commands', {})
-        for cmd_name, enabled in enabled_commands.items():
-            if not isinstance(enabled, bool):
-                errors.append(f"基础命令 {cmd_name} 的启用状态必须是布尔值")
-        
-        enabled_admin_commands = commands_config.get('enabled_admin_commands', {})
-        for cmd_name, enabled in enabled_admin_commands.items():
-            if not isinstance(enabled, bool):
-                errors.append(f"管理员命令 {cmd_name} 的启用状态必须是布尔值")
 
-        # TPS配置验证
-        tps_errors = self._validate_tps_config()
-        errors.extend(tps_errors)
+        seen_server_names = set()
+        for index, server in enumerate(self.get_servers(), 1):
+            errors.extend(self._validate_server_config(server, index, seen_server_names, ws_port))
 
-        listener_errors = self._validate_custom_listeners()
-        errors.extend(listener_errors)
-        
+        return errors
+
+    def _validate_server_config(self, server: Dict[str, Any], index: int, seen_server_names: set, ws_port: int) -> List[str]:
+        """验证单个独立服务器配置文件。"""
+        errors = []
+        source = server.get('_config_file') or f"servers[{index}]"
+
+        try:
+            name = str(server.get('name') or f'server{index}').strip()
+            if name.lower() in seen_server_names:
+                errors.append(f"服务器名称重复: {name}")
+            seen_server_names.add(name.lower())
+
+            msmp_config = server.get('msmp') or {}
+            rcon_config = server.get('rcon') or {}
+            msmp_enabled = bool(msmp_config.get('enabled', False))
+            rcon_enabled = bool(rcon_config.get('enabled', False))
+
+            if not msmp_enabled and not rcon_enabled:
+                errors.append(f"{source} 必须至少启用MSMP或RCON其中一种连接方式")
+
+            qq_config = server.get('qq') or {}
+            groups = qq_config.get('groups') or []
+            admins = qq_config.get('admins') or []
+            if not groups:
+                errors.append(f"{source} 至少需要配置一个QQ群")
+            for group_id in groups:
+                if not isinstance(group_id, int) or group_id <= 0:
+                    errors.append(f"{source} 无效的QQ群号: {group_id}")
+            if not admins:
+                errors.append(f"{source} 至少需要配置一个管理员QQ号")
+            for admin_id in admins:
+                if not isinstance(admin_id, int) or admin_id <= 0:
+                    errors.append(f"{source} 无效的管理员QQ号: {admin_id}")
+
+            if msmp_enabled:
+                msmp_port = int(msmp_config.get('port') or 0)
+                if not msmp_config.get('host'):
+                    errors.append(f"{source} MSMP host 未配置")
+                if not (1024 <= msmp_port <= 65535):
+                    errors.append(f"{source} MSMP端口 {msmp_port} 无效(应在1024-65535之间)")
+                if msmp_port == ws_port:
+                    errors.append(f"{source} MSMP端口不能与WebSocket端口相同 ({ws_port})")
+                if not msmp_config.get('password'):
+                    errors.append(f"{source} MSMP password 未配置")
+
+            if rcon_enabled:
+                rcon_port = int(rcon_config.get('port') or 0)
+                if not rcon_config.get('host'):
+                    errors.append(f"{source} RCON host 未配置")
+                if not (1024 <= rcon_port <= 65535):
+                    errors.append(f"{source} RCON端口 {rcon_port} 无效(应在1024-65535之间)")
+                if rcon_port == ws_port:
+                    errors.append(f"{source} RCON端口不能与WebSocket端口相同 ({ws_port})")
+                if not rcon_config.get('password'):
+                    errors.append(f"{source} RCON password 未配置")
+
+            server_section = server.get('server', {}) if isinstance(server.get('server'), dict) else {}
+            server_script = str(server_section.get('start_script') or '').strip()
+            if server_script and not server_script.lower().endswith(('.bat', '.cmd', '.sh')):
+                errors.append(f"{source} 启动脚本格式不支持: {server_script}(仅支持.bat/.cmd/.sh)")
+
+            commands_config = server.get('commands') or {}
+            enabled_commands = commands_config.get('enabled_commands', {})
+            for cmd_name, enabled in enabled_commands.items():
+                if not isinstance(enabled, bool):
+                    errors.append(f"{source} 基础命令 {cmd_name} 的启用状态必须是布尔值")
+
+            enabled_admin_commands = commands_config.get('enabled_admin_commands', {})
+            for cmd_name, enabled in enabled_admin_commands.items():
+                if not isinstance(enabled, bool):
+                    errors.append(f"{source} 管理员命令 {cmd_name} 的普通成员开放状态必须是布尔值")
+
+            errors.extend(self._validate_tps_config(commands_config, source))
+
+            custom_listeners = server.get('custom_listeners') or {}
+            if custom_listeners.get('enabled', False):
+                for i, rule in enumerate(custom_listeners.get('rules', [])):
+                    errors.extend(self._validate_listener_rule(rule, i))
+        except Exception as e:
+            errors.append(f"{source} 验证失败: {e}")
+
         return errors
     
     def _validate_custom_listeners(self) -> List[str]:
@@ -351,12 +290,12 @@ class ConfigManager:
         
         return errors
     
-    def _validate_tps_config(self) -> List[str]:
+    def _validate_tps_config(self, commands_config: Optional[Dict[str, Any]] = None, source: str = "commands") -> List[str]:
         """验证TPS相关配置"""
         errors = []
         
         try:
-            commands_config = self.config.get('commands', {})
+            commands_config = commands_config or {}
             
             # 验证 tps_regex
             tps_regex = commands_config.get('tps_regex', '')
@@ -364,26 +303,26 @@ class ConfigManager:
                 try:
                     re.compile(tps_regex)
                 except re.error as e:
-                    errors.append(f"TPS正则表达式语法错误: {e}")
+                    errors.append(f"{source} TPS正则表达式语法错误: {e}")
             else:
-                errors.append("TPS正则表达式不能为空")
+                errors.append(f"{source} TPS正则表达式不能为空")
             
             # 验证 tps_group_index
             tps_group_index = commands_config.get('tps_group_index', 1)
             if not isinstance(tps_group_index, int):
-                errors.append(f"tps_group_index 必须是整数,当前值: {tps_group_index}")
+                errors.append(f"{source} tps_group_index 必须是整数,当前值: {tps_group_index}")
             elif tps_group_index < 1:
-                errors.append(f"tps_group_index 必须大于等于1,当前值: {tps_group_index}")
+                errors.append(f"{source} tps_group_index 必须大于等于1,当前值: {tps_group_index}")
             elif tps_group_index > 10:
-                errors.append(f"tps_group_index 过大(建议不超过10),当前值: {tps_group_index}")
+                errors.append(f"{source} tps_group_index 过大(建议不超过10),当前值: {tps_group_index}")
             
             # 验证 tps_show_raw_output
             tps_show_raw = commands_config.get('tps_show_raw_output', True)
             if not isinstance(tps_show_raw, bool):
-                errors.append(f"tps_show_raw_output 必须是布尔值,当前值: {tps_show_raw}")
+                errors.append(f"{source} tps_show_raw_output 必须是布尔值,当前值: {tps_show_raw}")
             
         except Exception as e:
-            errors.append(f"验证TPS配置时出错: {e}")
+            errors.append(f"{source} 验证TPS配置时出错: {e}")
         
         return errors
     
@@ -446,8 +385,15 @@ class ConfigManager:
             try:
                 if asyncio.iscoroutinefunction(callback):
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
+                        loop = self._event_loop or asyncio.get_event_loop()
+                        try:
+                            running_loop = asyncio.get_running_loop()
+                        except RuntimeError:
+                            running_loop = None
+
+                        if running_loop is loop:
+                            loop.create_task(callback(old_config, new_config))
+                        elif loop.is_running():
                             future = asyncio.run_coroutine_threadsafe(
                                 callback(old_config, new_config),
                                 loop
@@ -501,44 +447,186 @@ class ConfigManager:
     
     # ============ QQ群配置 ============
     def get_qq_groups(self) -> List[int]:
-        return self.config.get('qq', {}).get('groups', [])
+        groups = []
+        for server in self.get_servers():
+            groups.extend((server.get('qq') or {}).get('groups', []))
+        return sorted({group for group in groups if isinstance(group, int)})
     
     def get_qq_admins(self) -> List[int]:
-        return self.config.get('qq', {}).get('admins', [])
+        admins = []
+        for server in self.get_servers():
+            admins.extend((server.get('qq') or {}).get('admins', []))
+        return sorted({admin for admin in admins if isinstance(admin, int)})
     
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.get_qq_admins()
+
+    def is_server_admin(self, user_id: int, server: Optional[Dict[str, Any]] = None) -> bool:
+        if not server:
+            return self.is_admin(user_id)
+        return user_id in ((server.get('qq') or {}).get('admins', []))
     
     def is_welcome_new_members_enabled(self) -> bool:
-        return self.config.get('qq', {}).get('welcome_new_members', False)
+        return False
     
     def get_welcome_message(self) -> str:
-        return self.config.get('qq', {}).get('welcome_message', '欢迎新成员加入！输入 help 查看可用命令')
+        return '{at} 欢迎加入！输入 help 查看可用命令'
+
+    def get_server_welcome_config(self, group_id: int) -> Dict[str, Any]:
+        matching_configs = [
+            (server.get('qq') or {})
+            for server in self.get_servers()
+            if group_id in ((server.get('qq') or {}).get('groups') or [])
+        ]
+        for qq_config in matching_configs:
+            if qq_config.get('welcome_new_members', False):
+                return {
+                    'enabled': True,
+                    'message': qq_config.get('welcome_message', '{at} 欢迎加入！输入 help 查看可用命令'),
+                }
+        return {
+            'enabled': False,
+            'message': '{at} 欢迎加入！输入 help 查看可用命令',
+        }
     
-    def is_log_messages_enabled(self) -> bool:
-        return self.config.get('notifications', {}).get('log_messages', False)
+    def _notifications_config(self, server: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if server:
+            notifications = server.get('notifications')
+            if isinstance(notifications, dict):
+                return notifications
+        notifications = self.config.get('notifications', {})
+        return notifications if isinstance(notifications, dict) else {}
+
+    def is_log_messages_enabled(self, server: Optional[Dict[str, Any]] = None) -> bool:
+        return self._notifications_config(server).get('log_messages', False)
     
     # ============ 服务器配置 ============
-    def get_server_start_script(self) -> str:
-        return self.config.get('server', {}).get('start_script', '')
+    def _server_runtime_config(self, server: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if server:
+            server_config = server.get('server')
+            if isinstance(server_config, dict):
+                return server_config
+        server_config = self.config.get('server', {})
+        return server_config if isinstance(server_config, dict) else {}
+
+    def get_server_start_script(self, server: Optional[Dict[str, Any]] = None) -> str:
+        return self._resolve_runtime_path(self._server_runtime_config(server).get('start_script', ''))
     
-    def get_server_working_directory(self) -> str:
-        return self.config.get('server', {}).get('working_directory', '')
+    def get_server_working_directory(self, server: Optional[Dict[str, Any]] = None) -> str:
+        runtime_config = self._server_runtime_config(server)
+        working_dir = self._resolve_runtime_path(runtime_config.get('working_directory', ''))
+        if working_dir:
+            return working_dir
+        start_script = self.get_server_start_script(server)
+        return os.path.dirname(start_script) if start_script else ''
+
+    def _resolve_runtime_path(self, value: Any) -> str:
+        path = str(value or '').strip().replace('\\', os.sep).replace('/', os.sep)
+        if not path:
+            return ''
+        if os.path.isabs(path):
+            return path
+        return os.path.abspath(path)
     
-    def get_server_startup_timeout(self) -> int:
-        return self.config.get('server', {}).get('startup_timeout', 300)
+    def get_server_startup_timeout(self, server: Optional[Dict[str, Any]] = None) -> int:
+        return self._server_runtime_config(server).get('startup_timeout', 300)
     
-    def is_auto_restart_on_crash_enabled(self) -> bool:
+    def is_auto_restart_on_crash_enabled(self, server: Optional[Dict[str, Any]] = None) -> bool:
         """是否启用崩溃后自动重启"""
-        return self.config.get('server', {}).get('auto_restart_on_crash', False)
+        return self._server_runtime_config(server).get('auto_restart_on_crash', False)
 
-    def get_crash_restart_delay(self) -> int:
+    def get_crash_restart_delay(self, server: Optional[Dict[str, Any]] = None) -> int:
         """获取异常停止重启延迟(秒)"""
-        return self.config.get('server', {}).get('crash_restart_delay', 10)
+        return self._server_runtime_config(server).get('crash_restart_delay', 10)
 
-    def get_log_idle_restart_timeout(self) -> int:
+    def get_log_idle_restart_timeout(self, server: Optional[Dict[str, Any]] = None) -> int:
         """获取日志空闲重启超时时间(秒),0表示关闭"""
-        return self.config.get('server', {}).get('log_idle_restart_timeout', 0)
+        return self._server_runtime_config(server).get('log_idle_restart_timeout', 0)
+
+    def get_servers(self) -> List[Dict[str, Any]]:
+        """获取多服务器配置。servers/*.yml 必须是完整配置文件结构。"""
+        file_servers = self.config.get('_server_files', [])
+        if isinstance(file_servers, list) and file_servers:
+            return [dict(server) for server in file_servers if isinstance(server, dict)]
+        return []
+
+    def get_server_config_dir(self) -> Path:
+        """获取独立服务器配置目录。"""
+        configured = str(self.config.get('server_config_dir') or 'servers').strip()
+        path = Path(configured)
+        if not path.is_absolute():
+            path = Path(self.config_path).resolve().parent / path
+        return path
+
+    def _load_server_files(self) -> List[Dict[str, Any]]:
+        """从 servers/*.yml 加载完整服务器配置文件。"""
+        server_dir = self.get_server_config_dir()
+        if not server_dir.exists():
+            return []
+
+        servers = []
+        for path in sorted([*server_dir.glob("*.yml"), *server_dir.glob("*.yaml")]):
+            try:
+                data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+                if not isinstance(data, dict):
+                    raise ConfigValidationError(f"{path} 顶层必须是对象")
+                missing_sections = [
+                    section for section in self.SERVER_REQUIRED_SECTIONS
+                    if not isinstance(data.get(section), dict)
+                ]
+                if missing_sections:
+                    raise ConfigValidationError(
+                        f"{path} 不是完整服务器配置，缺少配置段: {', '.join(missing_sections)}"
+                    )
+                data.setdefault('name', path.stem)
+                data['_config_file'] = str(path)
+                servers.append(data)
+            except ConfigValidationError:
+                raise
+            except yaml.YAMLError as e:
+                raise ConfigValidationError(f"服务器配置文件YAML格式错误 {path}: {e}")
+            except Exception as e:
+                raise ConfigValidationError(f"读取服务器配置文件失败 {path}: {e}")
+        return servers
+
+    def resolve_server(self, selector: str = "") -> Optional[Dict[str, Any]]:
+        """按编号或名称解析服务器配置。编号从 1 开始。"""
+        servers = self.get_servers()
+        selector = str(selector or "").strip()
+        if not selector:
+            return dict(servers[0]) if servers else None
+
+        if selector.isdigit():
+            index = int(selector) - 1
+            if 0 <= index < len(servers):
+                return dict(servers[index])
+            return None
+
+        selector_lower = selector.lower()
+        for server in servers:
+            name = str(server.get('name', '')).lower()
+            if name == selector_lower:
+                return dict(server)
+        return None
+
+    def resolve_server_for_group(self, group_id: int) -> Optional[Dict[str, Any]]:
+        """按QQ群号解析默认服务器。"""
+        for server in self.get_servers():
+            if group_id in ((server.get('qq') or {}).get('groups', [])):
+                return dict(server)
+        return None
+
+    def resolve_servers_for_context(self, user_id: int = 0, group_id: int = 0, is_private: bool = False) -> List[Dict[str, Any]]:
+        """按当前群聊/私聊上下文获取有权限访问的服务器列表。"""
+        servers = []
+        for server in self.get_servers():
+            qq_config = server.get('qq') or {}
+            if is_private:
+                if user_id in (qq_config.get('admins') or []):
+                    servers.append(dict(server))
+            elif group_id and group_id in (qq_config.get('groups') or []):
+                servers.append(dict(server))
+        return servers
 
     # ============ 命令配置 ============
     def get_tps_command(self) -> str:
@@ -562,7 +650,7 @@ class ConfigManager:
         return enabled_commands.get(command_name, True)
 
     def is_admin_command_enabled(self, command_name: str) -> bool:
-        """检查管理员命令是否启用（管理员不受此限制）"""
+        """检查管理员命令是否向普通成员开放（管理员不受此限制）"""
         enabled_admin_commands = self.config.get('commands', {}).get('enabled_admin_commands', {})
         return enabled_admin_commands.get(command_name, False)
 
@@ -600,7 +688,7 @@ class ConfigManager:
         })
 
     def get_enabled_admin_commands(self) -> Dict[str, bool]:
-        """获取启用的管理员命令列表"""
+        """获取向普通成员开放的管理员命令列表。"""
         return self.config.get('commands', {}).get('enabled_admin_commands', {
             'start': False,
             'stop': False,
@@ -619,28 +707,29 @@ class ConfigManager:
         })
     
     # ============ 通知配置 ============
-    def is_server_event_notify_enabled(self) -> bool:
-        return self.config.get('notifications', {}).get('server_events', True)
+    def is_server_event_notify_enabled(self, server: Optional[Dict[str, Any]] = None) -> bool:
+        return self._notifications_config(server).get('server_events', True)
     
-    def is_player_event_notify_enabled(self) -> bool:
-        return self.config.get('notifications', {}).get('player_events', False)
+    def is_player_event_notify_enabled(self, server: Optional[Dict[str, Any]] = None) -> bool:
+        return self._notifications_config(server).get('player_events', False)
     
     # ============ 区块监控配置 ============
-    def get_chunk_monitor_config(self) -> Dict[str, bool]:
-        return self.config.get('notifications', {}).get('chunk_monitor', {
+    def get_chunk_monitor_config(self, server: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+        config = self._notifications_config(server).get('chunk_monitor', {
             'enabled': False,
             'notify_admins': True,
             'notify_groups': True
         })
+        return config if isinstance(config, dict) else {}
 
-    def is_chunk_monitor_enabled(self) -> bool:
-        return self.get_chunk_monitor_config().get('enabled', False)
+    def is_chunk_monitor_enabled(self, server: Optional[Dict[str, Any]] = None) -> bool:
+        return self.get_chunk_monitor_config(server).get('enabled', False)
 
-    def should_notify_admins_on_chunk_monitor(self) -> bool:
-        return self.get_chunk_monitor_config().get('notify_admins', True)
+    def should_notify_admins_on_chunk_monitor(self, server: Optional[Dict[str, Any]] = None) -> bool:
+        return self.get_chunk_monitor_config(server).get('notify_admins', True)
 
-    def should_notify_groups_on_chunk_monitor(self) -> bool:
-        return self.get_chunk_monitor_config().get('notify_groups', True)
+    def should_notify_groups_on_chunk_monitor(self, server: Optional[Dict[str, Any]] = None) -> bool:
+        return self.get_chunk_monitor_config(server).get('notify_groups', True)
     
     # ============ 高级配置 ============
     def get_reconnect_interval(self) -> int:
@@ -655,8 +744,13 @@ class ConfigManager:
     def get_max_message_length(self) -> int:
         return self.config.get('advanced', {}).get('max_message_length', 2500)
     
-    def get_max_server_logs(self) -> int:
+    def get_max_server_logs(self, server: Optional[Dict[str, Any]] = None) -> int:
         """获取最大服务器日志行数"""
+        if server:
+            return (server.get('advanced') or {}).get(
+                'max_server_logs',
+                self.config.get('advanced', {}).get('max_server_logs', 100)
+            )
         return self.config.get('advanced', {}).get('max_server_logs', 100)
     
     def get_player_list_cache_ttl(self) -> int:
@@ -817,28 +911,24 @@ class ConfigManager:
     
     def to_dict(self) -> Dict:
         """获取配置字典(隐藏敏感信息)"""
-        safe_config = self.config.copy()
-        if 'msmp' in safe_config and 'password' in safe_config['msmp']:
-            safe_config['msmp']['password'] = '***'
-        if 'rcon' in safe_config and 'password' in safe_config['rcon']:
-            safe_config['rcon']['password'] = '***'
+        safe_config = copy.deepcopy(self.config)
         if 'websocket' in safe_config and 'token' in safe_config['websocket']:
             safe_config['websocket']['token'] = '***' if safe_config['websocket']['token'] else ''
+        for server in safe_config.get('_server_files', []) or []:
+            if not isinstance(server, dict):
+                continue
+            for section in ('msmp', 'rcon'):
+                section_config = server.get(section)
+                if isinstance(section_config, dict) and section_config.get('password'):
+                    section_config['password'] = '***'
         return safe_config
     
     def get_config_status(self) -> str:
         """获取配置状态信息"""
         lines = ["=" * 60, "配置状态信息", "=" * 60]
         
-        lines.append("\n【连接配置】")
-        lines.append(f"  MSMP: {'启用' if self.is_msmp_enabled() else '禁用'}")
-        if self.is_msmp_enabled():
-            lines.append(f"    - 地址: {self.get_msmp_host()}:{self.get_msmp_port()}")
-        
-        lines.append(f"  RCON: {'启用' if self.is_rcon_enabled() else '禁用'}")
-        if self.is_rcon_enabled():
-            lines.append(f"    - 地址: {self.get_rcon_host()}:{self.get_rcon_port()}")
-        
+        servers = self.get_servers()
+        lines.append("\n【Bot连接配置】")
         lines.append(f"  WebSocket: 端口 {self.get_ws_port()}")
         if self.is_websocket_auth_enabled():
             lines.append(f"    - 认证: 已启用")
@@ -847,26 +937,28 @@ class ConfigManager:
         lines.append(f"  群号数: {len(self.get_qq_groups())}")
         lines.append(f"  管理员数: {len(self.get_qq_admins())}")
         
-        lines.append("\n【命令配置】")
-        lines.append(f"  基础命令启用: {sum(1 for v in self.get_enabled_commands().values() if v)}/{len(self.get_enabled_commands())}")
-        lines.append(f"  管理员命令启用: {sum(1 for v in self.get_enabled_admin_commands().values() if v)}/{len(self.get_enabled_admin_commands())}")
-        
-        lines.append("\n【功能配置】")
-        lines.append(f"  自定义命令: {'启用' if self.is_custom_commands_enabled() else '禁用'}")
-        lines.append(f"  自定义监听: {'启用' if self.is_custom_listeners_enabled() else '禁用'}")
-        lines.append(f"  定时任务: {'启用' if self.is_scheduled_tasks_enabled() else '禁用'}")
-        lines.append(f"  调试模式: {'启用' if self.is_debug_mode() else '禁用'}")
-        
         lines.append("\n【服务器配置】")
-        lines.append(f"  启动脚本: {self.get_server_start_script() if self.get_server_start_script() else '未配置'}")
-        lines.append(f"  启动超时: {self.get_server_startup_timeout()}秒")
-        
-        lines.append("\n【高级配置】")
-        lines.append(f"  重连间隔: {self.get_reconnect_interval()}秒")
-        lines.append(f"  心跳间隔: {self.get_heartbeat_interval()}秒")
-        lines.append(f"  命令冷却: {self.get_command_cooldown()}秒")
-        lines.append(f"  最大消息长度: {self.get_max_message_length()}字符")
-        lines.append(f"  最大日志行数: {self.get_max_server_logs()}行")
+        lines.append(f"  独立服务器配置数: {len(servers)}")
+        for index, server in enumerate(servers, 1):
+            name = server.get('name') or f'server{index}'
+            msmp = server.get('msmp') or {}
+            rcon = server.get('rcon') or {}
+            qq = server.get('qq') or {}
+            server_section = server.get('server') or {}
+            commands = server.get('commands') or {}
+            advanced = server.get('advanced') or {}
+            enabled_commands = commands.get('enabled_commands') or {}
+            enabled_admin = commands.get('enabled_admin_commands') or {}
+            lines.append(f"  {index}. {name}")
+            lines.append(f"    - 配置文件: {server.get('_config_file', '未知')}")
+            lines.append(f"    - MSMP: {'启用' if msmp.get('enabled') else '禁用'} {msmp.get('host', 'localhost')}:{msmp.get('port', '-')}")
+            lines.append(f"    - RCON: {'启用' if rcon.get('enabled') else '禁用'} {rcon.get('host', 'localhost')}:{rcon.get('port', '-')}")
+            lines.append(f"    - QQ群: {len(qq.get('groups') or [])} 个，管理员: {len(qq.get('admins') or [])} 个")
+            lines.append(f"    - 启动脚本: {server_section.get('start_script') or '未配置'}")
+            lines.append(f"    - 启动超时: {server_section.get('startup_timeout', 300)}秒")
+            lines.append(f"    - 基础命令: {sum(1 for v in enabled_commands.values() if v)}/{len(enabled_commands)}")
+            lines.append(f"    - 管理员命令向普通成员开放: {sum(1 for v in enabled_admin.values() if v)}/{len(enabled_admin)}")
+            lines.append(f"    - 命令冷却: {advanced.get('command_cooldown', 3)}秒，最大日志: {advanced.get('max_server_logs', 100)}行")
         
         lines.append("=" * 60)
         return "\n".join(lines)

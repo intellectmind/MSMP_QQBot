@@ -23,6 +23,7 @@ class CustomCommand:
     group_message: str = ""  # 发送到群的消息
     server_command: str = ""  # 执行的服务器命令
     private_message: str = ""  # 发送到触发者的私聊消息
+    server_key: str = ""
     
     # 高级功能
     conditions: List[Dict[str, Any]] = None  # 执行条件
@@ -62,50 +63,70 @@ class CustomCommandHandler:
         self.logger = logger
         self.commands: List[CustomCommand] = []
         self._load_commands_from_config()
+
+    def _websocket_open(self, websocket) -> bool:
+        if not websocket:
+            return False
+        closed = getattr(websocket, "closed", None)
+        if closed is not None:
+            return not closed
+        state = getattr(websocket, "state", None)
+        if state is not None:
+            return getattr(state, "name", "") == "OPEN"
+        return getattr(websocket, "close_code", None) is None
     
     def _load_commands_from_config(self):
         """从配置文件加载自定义指令"""
         try:
-            if 'custom_commands' not in self.config_manager.config:
-                self.logger.info("未配置自定义指令")
-                return
-            
-            commands_config = self.config_manager.config.get('custom_commands', {})
-            
-            if not commands_config.get('enabled', False):
-                self.logger.info("自定义指令已禁用")
-                return
-            
-            rules = commands_config.get('rules', [])
-            
-            if not rules:
-                self.logger.info("未配置任何自定义指令规则")
-                return
-            
+            server_configs = self.config_manager.get_servers() if hasattr(self.config_manager, 'get_servers') else []
+            if not server_configs:
+                server_configs = [self.config_manager.config]
+
             new_commands = []
-            for rule_config in rules:
-                try:
-                    cmd = CustomCommand(
-                        name=rule_config.get('name', f'cmd_{len(new_commands)}'),
-                        pattern=rule_config.get('pattern', ''),
-                        enabled=rule_config.get('enabled', True),
-                        admin_only=rule_config.get('admin_only', False),
-                        description=rule_config.get('description', ''),
-                        case_sensitive=rule_config.get('case_sensitive', False),
-                        trigger_limit=rule_config.get('trigger_limit', 0),
-                        trigger_cooldown=rule_config.get('trigger_cooldown', 0),
-                        daily_limit=rule_config.get('daily_limit', 0),
-                        group_message=rule_config.get('group_message', ''),
-                        server_command=rule_config.get('server_command', ''),
-                        private_message=rule_config.get('private_message', ''),
-                        conditions=rule_config.get('conditions', [])
-                    )
-                    new_commands.append(cmd)
-                    self.logger.info(f"已加载自定义指令: {cmd.name} [{'启用' if cmd.enabled else '禁用'}]")
-                
-                except ValueError as e:
-                    self.logger.error(f"加载自定义指令失败: {e}")
+            for server_config in server_configs:
+                if 'custom_commands' not in server_config:
                     continue
+
+                commands_config = server_config.get('custom_commands', {})
+                server_key = server_config.get('_config_file') or server_config.get('name') or ''
+            
+                if not commands_config.get('enabled', False):
+                    self.logger.info("服务器 %s 自定义指令已禁用", server_config.get('name', '默认'))
+                    continue
+            
+                rules = commands_config.get('rules', [])
+            
+                if not rules:
+                    self.logger.info("服务器 %s 未配置任何自定义指令规则", server_config.get('name', '默认'))
+                    continue
+            
+                for rule_config in rules:
+                    try:
+                        cmd = CustomCommand(
+                            name=rule_config.get('name', f'cmd_{len(new_commands)}'),
+                            pattern=rule_config.get('pattern', ''),
+                            enabled=rule_config.get('enabled', True),
+                            admin_only=rule_config.get('admin_only', False),
+                            description=rule_config.get('description', ''),
+                            case_sensitive=rule_config.get('case_sensitive', False),
+                            trigger_limit=rule_config.get('trigger_limit', 0),
+                            trigger_cooldown=rule_config.get('trigger_cooldown', 0),
+                            daily_limit=rule_config.get('daily_limit', 0),
+                            group_message=rule_config.get('group_message', ''),
+                            server_command=rule_config.get('server_command', ''),
+                            private_message=rule_config.get('private_message', ''),
+                            server_key=server_key,
+                            conditions=rule_config.get('conditions', [])
+                        )
+                        new_commands.append(cmd)
+                        self.logger.info(f"已加载自定义指令: {cmd.name} [{'启用' if cmd.enabled else '禁用'}]")
+                
+                    except ValueError as e:
+                        self.logger.error(f"加载自定义指令失败: {e}")
+                        continue
+
+            if not new_commands:
+                self.logger.info("未配置自定义指令")
             
             self.commands = new_commands
             self.logger.info(f"共加载 {len(self.commands)} 个自定义指令")
@@ -117,13 +138,56 @@ class CustomCommandHandler:
         """重新加载指令"""
         self.commands.clear()
         self._load_commands_from_config()
+
+    def find_matching_servers(self,
+                              message: str,
+                              user_id: int,
+                              servers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """查找当前消息会在哪些服务器上触发自定义指令，不产生副作用。"""
+        matched_servers = []
+        for server in servers:
+            if self._find_matching_command(message, user_id, server):
+                matched_servers.append(server)
+        return matched_servers
+
+    def _find_matching_command(self,
+                               message: str,
+                               user_id: int,
+                               target_server: Optional[Dict[str, Any]] = None):
+        target_key = self._server_key(target_server)
+        is_admin = self.config_manager.is_server_admin(user_id, target_server)
+
+        for cmd in self.commands:
+            if target_key and cmd.server_key and cmd.server_key != target_key:
+                continue
+            if not cmd.enabled:
+                continue
+            if cmd.admin_only and not is_admin:
+                self.logger.debug(f"用户 {user_id} 无权限执行指令 {cmd.name}")
+                continue
+
+            match = cmd.match(message)
+            if not match:
+                continue
+            if not self._check_trigger_conditions(cmd, user_id):
+                self.logger.debug(f"指令 {cmd.name} 触发条件不满足")
+                continue
+            return cmd, match
+
+        return None
+
+    def _server_key(self, target_server: Optional[Dict[str, Any]] = None) -> str:
+        if not target_server:
+            return ""
+        return str(target_server.get('_config_file') or target_server.get('name') or '')
     
     async def process_group_message(self,
                                    message: str,
                                    user_id: int,
                                    group_id: int,
                                    websocket,
-                                   server_executor: Optional[Callable] = None) -> bool:
+                                   server_executor: Optional[Callable] = None,
+                                   target_server: Optional[Dict[str, Any]] = None) -> bool:
         """
         处理群消息中的自定义指令
         
@@ -137,55 +201,36 @@ class CustomCommandHandler:
         Returns:
             True 如果匹配了指令，False 否则
         """
-        is_admin = self.config_manager.is_admin(user_id)
-        
-        for cmd in self.commands:
-            # 检查是否启用
-            if not cmd.enabled:
-                continue
-            
-            # 检查管理员权限
-            if cmd.admin_only and not is_admin:
-                self.logger.debug(f"用户 {user_id} 无权限执行指令 {cmd.name}")
-                continue
-            
-            # 检查正则匹配
-            match = cmd.match(message)
-            if not match:
-                continue
-            
-            # 检查触发条件
-            if not self._check_trigger_conditions(cmd, user_id):
-                self.logger.debug(f"指令 {cmd.name} 触发条件不满足")
-                continue
-            
-            self.logger.info(f"触发自定义指令: {cmd.name} (用户: {user_id}, 群: {group_id})")
-            
-            try:
-                # 发送群消息
-                if cmd.group_message:
-                    formatted_msg = self._format_message(cmd.group_message, match, user_id)
-                    await self._send_group_message(websocket, group_id, formatted_msg)
-                
-                # 发送私聊消息
-                if cmd.private_message:
-                    formatted_msg = self._format_message(cmd.private_message, match, user_id)
-                    await self._send_private_message(websocket, user_id, formatted_msg)
-                
-                # 执行服务器命令
-                if cmd.server_command and server_executor:
-                    formatted_cmd = self._format_message(cmd.server_command, match, user_id)
-                    await server_executor(formatted_cmd)
-                
-                # 更新触发历史
-                self._update_trigger_history(cmd)
-                
-            except Exception as e:
-                self.logger.error(f"执行自定义指令 {cmd.name} 失败: {e}", exc_info=True)
-            
-            return True  # 已处理此指令
-        
-        return False  # 未匹配任何指令
+        matched = self._find_matching_command(message, user_id, target_server)
+        if not matched:
+            return False
+
+        cmd, match = matched
+        self.logger.info(f"触发自定义指令: {cmd.name} (用户: {user_id}, 群: {group_id})")
+
+        try:
+            # 发送群消息
+            if cmd.group_message:
+                formatted_msg = self._format_message(cmd.group_message, match, user_id)
+                await self._send_group_message(websocket, group_id, formatted_msg)
+
+            # 发送私聊消息
+            if cmd.private_message:
+                formatted_msg = self._format_message(cmd.private_message, match, user_id)
+                await self._send_private_message(websocket, user_id, formatted_msg)
+
+            # 执行服务器命令
+            if cmd.server_command and server_executor:
+                formatted_cmd = self._format_message(cmd.server_command, match, user_id)
+                await asyncio.wait_for(server_executor(formatted_cmd), timeout=30.0)
+
+            # 更新触发历史
+            self._update_trigger_history(cmd)
+
+        except Exception as e:
+            self.logger.error(f"执行自定义指令 {cmd.name} 失败: {e}", exc_info=True)
+
+        return True
     
     def _check_trigger_conditions(self, cmd: CustomCommand, user_id: int) -> bool:
         """检查触发条件"""
@@ -247,7 +292,7 @@ class CustomCommandHandler:
     async def _send_group_message(self, websocket, group_id: int, message: str):
         """发送群消息"""
         try:
-            if not websocket or websocket.closed:
+            if not self._websocket_open(websocket):
                 self.logger.warning("WebSocket连接已关闭，无法发送群消息")
                 return
             
@@ -267,7 +312,7 @@ class CustomCommandHandler:
     async def _send_private_message(self, websocket, user_id: int, message: str):
         """发送私聊消息"""
         try:
-            if not websocket or websocket.closed:
+            if not self._websocket_open(websocket):
                 self.logger.warning("WebSocket连接已关闭，无法发送私聊")
                 return
             

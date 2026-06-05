@@ -20,7 +20,7 @@ class ConnectionCache:
     def __init__(self, ttl: int = 5):
         """
         Args:
-            ttl: 缓存过期时间（秒）
+            ttl: 缓存过期时间(秒)
         """
         self.ttl = ttl
         self.cache = {}  # {key: (status, timestamp)}
@@ -54,6 +54,10 @@ class ConnectionCache:
         async with self.lock:
             self.cache.clear()
 
+    def clear_nowait(self):
+        """同步清空缓存，用于非 async 上下文的配置切换。"""
+        self.cache.clear()
+
 
 class ConnectionManager:
     """统一的连接管理器 - 集中管理所有连接状态和操作"""
@@ -68,6 +72,7 @@ class ConnectionManager:
         self.msmp_client = None
         self.rcon_client = None
         self.config_manager = None
+        self.active_server_config = None
         
         # 统一的状态管理
         self._msmp_status = {
@@ -96,8 +101,20 @@ class ConnectionManager:
         self.config_manager = config_manager
         
         # 初始化状态
-        self._msmp_status['enabled'] = self.config_manager.is_msmp_enabled() if config_manager else False
-        self._rcon_status['enabled'] = self.config_manager.is_rcon_enabled() if config_manager else False
+        self._msmp_status['enabled'] = self._protocol_enabled('msmp')
+        self._rcon_status['enabled'] = self._protocol_enabled('rcon')
+
+    def set_active_server_config(self, server_config: Optional[Dict[str, Any]]):
+        """设置当前托管服务器配置，供多服务器连接状态判断使用。"""
+        self.active_server_config = dict(server_config) if isinstance(server_config, dict) else None
+        self.cache.clear_nowait()
+        self._msmp_status['enabled'] = self._protocol_enabled('msmp')
+        self._rcon_status['enabled'] = self._protocol_enabled('rcon')
+
+    def _protocol_enabled(self, protocol: str) -> bool:
+        server_config = self.active_server_config or {}
+        protocol_config = server_config.get(protocol) or {}
+        return bool(protocol_config.get('enabled', False))
     
     # ============ 统一的状态管理方法 ============
     
@@ -173,11 +190,15 @@ class ConnectionManager:
         """更新所有连接状态"""
         await self.update_msmp_status()
         await self.update_rcon_status()
+
+    async def invalidate_all_caches(self):
+        """清空连接状态缓存。"""
+        await self.cache.clear()
     
     # ============ 状态查询方法 ============
     
     async def is_msmp_connected(self) -> bool:
-        """检查MSMP是否连接（带缓存）"""
+        """检查MSMP是否连接(带缓存)"""
         cached = await self.cache.get("msmp_connected")
         if cached is not None:
             return cached == ConnectionStatus.CONNECTED
@@ -191,7 +212,7 @@ class ConnectionManager:
         return is_connected
     
     async def is_rcon_connected(self) -> bool:
-        """检查RCON是否连接（带缓存）"""
+        """检查RCON是否连接(带缓存)"""
         cached = await self.cache.get("rcon_connected")
         if cached is not None:
             return cached == ConnectionStatus.CONNECTED
@@ -208,7 +229,7 @@ class ConnectionManager:
         """获取完整的连接状态"""
         await self.update_all_status()
         
-        return {
+        status = {
             'msmp_enabled': self._msmp_status['enabled'],
             'msmp_connected': self._msmp_status['connected'],
             'msmp_authenticated': self._msmp_status['authenticated'],
@@ -219,6 +240,20 @@ class ConnectionManager:
             'cache_ttl': self.cache.ttl,
             'cache_size': len(self.cache.cache)
         }
+        
+        # 添加MSMP心跳状态
+        if self.msmp_client and hasattr(self.msmp_client, 'get_detailed_status'):
+            try:
+                msmp_details = self.msmp_client.get_detailed_status()
+                status['msmp_heartbeat'] = msmp_details.get('heartbeat_status', 'unknown')
+                status['msmp_last_activity'] = msmp_details.get(
+                    'last_signal_seconds_ago',
+                    msmp_details.get('last_activity_seconds_ago', -1)
+                )
+            except Exception as e:
+                self.logger.debug(f"获取MSMP心跳状态失败: {e}")
+        
+        return status
     
     async def get_detailed_status(self) -> Dict[str, Any]:
         """获取详细状态信息"""
@@ -267,8 +302,8 @@ class ConnectionManager:
             
             # 重新初始化状态
             if self.config_manager:
-                self._msmp_status['enabled'] = self.config_manager.is_msmp_enabled()
-                self._rcon_status['enabled'] = self.config_manager.is_rcon_enabled()
+                self._msmp_status['enabled'] = self._protocol_enabled('msmp')
+                self._rcon_status['enabled'] = self._protocol_enabled('rcon')
             
             # 清空缓存
             await self.cache.clear()
@@ -288,8 +323,18 @@ class ConnectionManager:
                 if hasattr(self.msmp_client, 'reconnecting'):
                     self.msmp_client.reconnecting = False
                 
-                # 关闭连接
-                if hasattr(self.msmp_client, 'close'):
+                # MSMPClient 运行在后台事件循环，优先完整停止后台 loop。
+                if hasattr(self.msmp_client, 'shutdown_sync'):
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self.msmp_client.shutdown_sync),
+                        timeout=7.0
+                    )
+                elif hasattr(self.msmp_client, 'close_sync'):
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self.msmp_client.close_sync),
+                        timeout=5.0
+                    )
+                elif hasattr(self.msmp_client, 'close'):
                     await asyncio.wait_for(self.msmp_client.close(), timeout=2.0)
             except Exception as e:
                 self.logger.debug(f"停止MSMP活动时出错: {e}")
@@ -306,26 +351,26 @@ class ConnectionManager:
     # ============ 连接操作 ============
     
     async def connect_all(self) -> Dict[str, bool]:
-        """连接所有启用的服务"""
+        """连接所有可用的服务"""
         if self._shutdown_mode:
-            self.logger.warning("关闭模式中，跳过连接")
+            self.logger.warning("关闭模式中,跳过连接")
             return {'msmp': False, 'rcon': False}
         
         results = {}
         
         # 连接MSMP
-        if self.config_manager and self.config_manager.is_msmp_enabled() and self.msmp_client:
+        if self._protocol_enabled('msmp') and self.msmp_client:
             results['msmp'] = await self._connect_msmp()
         else:
             results['msmp'] = False
         
         # 连接RCON
-        if self.config_manager and self.config_manager.is_rcon_enabled() and self.rcon_client:
+        if self._protocol_enabled('rcon') and self.rcon_client:
             results['rcon'] = await self._connect_rcon()
         else:
             results['rcon'] = False
         
-        # 清空缓存，强制重新检测
+        # 清空缓存,强制重新检测
         await self.cache.clear()
         
         return results
@@ -342,13 +387,9 @@ class ConnectionManager:
     
     async def reconnect_all(self) -> Dict[str, bool]:
         """重新连接所有服务"""
-        if self._shutdown_mode:
-            self.logger.warning("关闭模式中，跳过重连")
-            return {'msmp': False, 'rcon': False}
-        
         self.logger.info("开始重新连接所有服务...")
         
-        # 重置关闭模式
+        # 手动重连应允许从 stop/kill 后的关闭模式恢复
         await self.reset_shutdown_mode()
         
         # 等待一段时间让端口释放
@@ -359,17 +400,13 @@ class ConnectionManager:
     
     async def reconnect_msmp(self) -> bool:
         """重新连接MSMP"""
-        if self._shutdown_mode:
-            self.logger.warning("关闭模式中，跳过MSMP重连")
-            return False
-        
-        if not self.config_manager or not self.config_manager.is_msmp_enabled() or not self.msmp_client:
+        if not self._protocol_enabled('msmp') or not self.msmp_client:
             self.logger.warning("MSMP未启用或客户端未初始化")
             return False
         
         self.logger.info("重新连接MSMP...")
         
-        # 重置关闭模式
+        # 手动重连应允许从 stop/kill 后的关闭模式恢复
         await self.reset_shutdown_mode()
         
         # 等待
@@ -380,17 +417,13 @@ class ConnectionManager:
     
     async def reconnect_rcon(self) -> bool:
         """重新连接RCON"""
-        if self._shutdown_mode:
-            self.logger.warning("关闭模式中，跳过RCON重连")
-            return False
-        
-        if not self.config_manager or not self.config_manager.is_rcon_enabled() or not self.rcon_client:
+        if not self._protocol_enabled('rcon') or not self.rcon_client:
             self.logger.warning("RCON未启用或客户端未初始化")
             return False
         
         self.logger.info("重新连接RCON...")
         
-        # 重置关闭模式
+        # 手动重连应允许从 stop/kill 后的关闭模式恢复
         await self.reset_shutdown_mode()
         
         # 等待
@@ -408,25 +441,43 @@ class ConnectionManager:
                 return False
             
             # 检查是否已经连接
+            await self.cache.invalidate("msmp_connected")
             if await self.is_msmp_connected():
-                self.logger.debug("MSMP已连接，无需重复连接")
+                self.logger.debug("MSMP已连接,无需重复连接")
                 return True
             
             self.logger.info("连接MSMP服务器...")
             
-            # 使用同步方法连接（因为MSMPClient在后台线程运行）
+            # 使用同步方法连接(因为MSMPClient在后台线程运行)
             if hasattr(self.msmp_client, 'connect_sync'):
-                self.msmp_client.connect_sync()
+                if hasattr(self.msmp_client, 'start_background_loop'):
+                    await asyncio.to_thread(self.msmp_client.start_background_loop)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self.msmp_client.connect_sync)
             else:
                 # 异步连接
                 await self.msmp_client.connect()
             
-            # 等待连接建立
+            # 等待连接建立和心跳机制启动
             await asyncio.sleep(3)
             
+            await self.cache.invalidate("msmp_connected")
             if await self.is_msmp_connected():
                 self.logger.info("MSMP连接成功")
                 await self.cache.invalidate("msmp_connected")
+                
+                # 验证心跳机制是否正常
+                if hasattr(self.msmp_client, 'get_detailed_status'):
+                    try:
+                        details = self.msmp_client.get_detailed_status()
+                        heartbeat_status = details.get('heartbeat_status', 'unknown')
+                        if heartbeat_status == 'timeout':
+                            self.logger.warning("MSMP连接已建立,但心跳状态异常")
+                        else:
+                            self.logger.info(f"MSMP心跳机制正常 (状态: {heartbeat_status})")
+                    except Exception as e:
+                        self.logger.debug(f"获取MSMP心跳状态失败: {e}")
+                
                 return True
             else:
                 self.logger.warning("MSMP连接失败")
@@ -443,8 +494,9 @@ class ConnectionManager:
                 return False
             
             # 检查是否已经连接
+            await self.cache.invalidate("rcon_connected")
             if await self.is_rcon_connected():
-                self.logger.debug("RCON已连接，无需重复连接")
+                self.logger.debug("RCON已连接,无需重复连接")
                 return True
             
             self.logger.info("连接RCON服务器...")
@@ -456,6 +508,7 @@ class ConnectionManager:
             if success:
                 self.logger.info("RCON连接成功")
                 await self.cache.invalidate("rcon_connected")
+                await self.update_rcon_status()
                 return True
             else:
                 self.logger.warning("RCON连接失败")
@@ -472,17 +525,17 @@ class ConnectionManager:
         return await self.is_msmp_connected() or await self.is_rcon_connected()
     
     async def get_preferred_client(self) -> Tuple[Optional[str], Optional[object]]:
-        """获取优先客户端（MSMP优先于RCON）"""
+        """获取优先客户端(MSMP优先于RCON)"""
         if self._shutdown_mode:
             return None, None
         
         # 检查MSMP
-        if self.config_manager and self.config_manager.is_msmp_enabled():
+        if self._protocol_enabled('msmp'):
             if await self.is_msmp_connected():
                 return 'msmp', self.msmp_client
         
         # 检查RCON
-        if self.config_manager and self.config_manager.is_rcon_enabled():
+        if self._protocol_enabled('rcon'):
             if await self.is_rcon_connected():
                 return 'rcon', self.rcon_client
         
@@ -511,7 +564,7 @@ class ConnectionManager:
         """确保至少有一个连接活跃"""
         # 检查是否在关闭模式
         if self._shutdown_mode:
-            self.logger.debug("关闭模式中，跳过连接检查")
+            self.logger.debug("关闭模式中,跳过连接检查")
             return None, None
         
         client_type, client = await self.get_preferred_client()
@@ -524,7 +577,7 @@ class ConnectionManager:
             return None, None
         
         # 尝试自动重连
-        self.logger.warning("检测到连接断开，开始自动重连...")
+        self.logger.warning("检测到连接断开,开始自动重连...")
         await self._auto_reconnect()
         
         # 重连后再次获取
@@ -534,15 +587,15 @@ class ConnectionManager:
         """自动重连所有客户端"""
         # 检查关闭模式
         if self._shutdown_mode:
-            self.logger.debug("关闭模式中，跳过自动重连")
+            self.logger.debug("关闭模式中,跳过自动重连")
             return
         
         reconnect_tasks = []
         
-        if self.config_manager.is_msmp_enabled() and self.msmp_client:
+        if self._protocol_enabled('msmp') and self.msmp_client:
             reconnect_tasks.append(self._reconnect_msmp())
         
-        if self.config_manager.is_rcon_enabled() and self.rcon_client:
+        if self._protocol_enabled('rcon') and self.rcon_client:
             reconnect_tasks.append(self._reconnect_rcon())
         
         if reconnect_tasks:
@@ -557,6 +610,7 @@ class ConnectionManager:
     async def _reconnect_msmp(self):
         """重连 MSMP 客户端"""
         try:
+            await self.cache.invalidate("msmp_connected")
             if await self.is_msmp_connected():
                 return True
             
@@ -568,19 +622,21 @@ class ConnectionManager:
                     )
                     
                     if attempt > 0:
-                        self.logger.info(f"MSMP 重连尝试 {attempt + 1}/{self.max_reconnect_attempts}，等待 {delay} 秒...")
+                        self.logger.info(f"MSMP 重连尝试 {attempt + 1}/{self.max_reconnect_attempts},等待 {delay} 秒...")
                         await asyncio.sleep(delay)
                     
                     self.logger.debug("正在重连 MSMP...")
                     
                     # 直接调用连接方法
                     if hasattr(self.msmp_client, 'connect_sync'):
-                        self.msmp_client.connect_sync()
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, self.msmp_client.connect_sync)
                     else:
                         await self.msmp_client.connect()
                     
                     await asyncio.sleep(2)
                     
+                    await self.cache.invalidate("msmp_connected")
                     if await self.is_msmp_connected():
                         self.logger.info("MSMP 重连成功")
                         await self.cache.invalidate("msmp_connected")
@@ -600,6 +656,7 @@ class ConnectionManager:
     async def _reconnect_rcon(self):
         """重连 RCON 客户端"""
         try:
+            await self.cache.invalidate("rcon_connected")
             if await self.is_rcon_connected():
                 return True
             
@@ -611,7 +668,7 @@ class ConnectionManager:
                     )
                     
                     if attempt > 0:
-                        self.logger.info(f"RCON 重连尝试 {attempt + 1}/{self.max_reconnect_attempts}，等待 {delay} 秒...")
+                        self.logger.info(f"RCON 重连尝试 {attempt + 1}/{self.max_reconnect_attempts},等待 {delay} 秒...")
                         await asyncio.sleep(delay)
                     
                     self.logger.debug("正在重连 RCON...")
@@ -623,6 +680,7 @@ class ConnectionManager:
                     if success:
                         self.logger.info("RCON 重连成功")
                         await self.cache.invalidate("rcon_connected")
+                        await self.update_rcon_status()
                         return True
                     
                 except Exception as e:
@@ -641,15 +699,44 @@ class ConnectionManager:
     async def connect_after_server_start(self, delay: int = 5) -> Dict[str, bool]:
         """服务器启动后连接所有服务"""
         if self._shutdown_mode:
-            self.logger.warning(f"连接管理器处于关闭模式，跳过服务器启动后连接 (shutdown_mode={self._shutdown_mode})")
+            self.logger.warning(f"连接管理器处于关闭模式,跳过服务器启动后连接 (shutdown_mode={self._shutdown_mode})")
             return {'msmp': False, 'rcon': False}
         
         self.logger.info(f"等待{delay}秒后连接服务器...")
         await asyncio.sleep(delay)
         
+        # 在连接前再次确认不在关闭模式
+        if self._shutdown_mode:
+            self.logger.warning("延迟期间进入关闭模式，取消连接")
+            return {'msmp': False, 'rcon': False}
+        
         self.logger.info(f"开始连接服务器 (shutdown_mode={self._shutdown_mode})")
-        return await self.connect_all()
-    
-    async def invalidate_all_caches(self):
-        """失效所有缓存"""
+        
+        # 避免重复连接
         await self.cache.clear()
+        msmp_already_connected = await self.is_msmp_connected()
+        rcon_already_connected = await self.is_rcon_connected()
+        
+        if msmp_already_connected and rcon_already_connected:
+            self.logger.info("MSMP和RCON已经连接，无需重复连接")
+            return {'msmp': True, 'rcon': True}
+        
+        results = {}
+        
+        # 只连接未连接的服务
+        if not msmp_already_connected and self._protocol_enabled('msmp'):
+            self.logger.info("开始连接MSMP...")
+            results['msmp'] = await self._connect_msmp()
+        else:
+            results['msmp'] = msmp_already_connected
+        
+        if not rcon_already_connected and self._protocol_enabled('rcon'):
+            self.logger.info("开始连接RCON...")
+            results['rcon'] = await self._connect_rcon()
+        else:
+            results['rcon'] = rcon_already_connected
+        
+        # 清空缓存
+        await self.cache.clear()
+        
+        return results

@@ -3,12 +3,13 @@ import logging
 import os
 import re
 import asyncio
-import importlib.util
+import inspect
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
-from plugin_manager import BotPlugin
+from rcon_client import RCONClient
+from msmp_client import MSMPClient
 
 @dataclass
 class Command:
@@ -21,31 +22,210 @@ class Command:
     cooldown: int = 0
     command_key: str = ""
 
+
+@dataclass
+class RateLimitReservation:
+    """一次命令冷却预占，失败时可安全回滚。"""
+    user_id: int
+    command: str
+    timestamp: float
+    previous_timestamp: Optional[float]
+
+
+class PerCallRCONClient:
+    """按命令创建短连接的RCON代理，用于多服务器插件路由。"""
+
+    def __init__(self, host: str, port: int, password: str, logger: logging.Logger):
+        self.host = host
+        self.port = port
+        self.password = password
+        self.logger = logger
+
+    def _with_client(self, action):
+        client = RCONClient(self.host, self.port, self.password, self.logger)
+        try:
+            if not client.connect():
+                return None
+            return action(client)
+        finally:
+            client.close()
+
+    def run_connected(self, action):
+        client = RCONClient(self.host, self.port, self.password, self.logger)
+        try:
+            if not client.connect():
+                return False, None
+            return True, action(client)
+        finally:
+            client.close()
+
+    def is_connected(self) -> bool:
+        return bool(self._with_client(lambda _client: True))
+
+    def execute_command(self, command: str):
+        return self._with_client(lambda client: client.execute_command(command))
+
+    def get_player_list(self):
+        return self._with_client(lambda client: client.get_player_list())
+
+
+class PerCallMSMPClient:
+    """按命令创建短连接的MSMP代理，用于多服务器查询路由。"""
+
+    def __init__(self, host: str, port: int, password: str, logger: logging.Logger, config_manager=None):
+        self.host = host
+        self.port = port
+        self.password = password
+        self.logger = logger
+        self.config_manager = config_manager
+
+    def _with_client(self, action):
+        client = MSMPClient(self.host, self.port, self.password, self.logger, self.config_manager)
+        loop_started = False
+        try:
+            client.start_background_loop()
+            loop_started = True
+            if not client.connect_sync():
+                return None
+            return action(client)
+        finally:
+            if loop_started:
+                try:
+                    if client.is_connected():
+                        client.close_sync()
+                finally:
+                    client.loop.call_soon_threadsafe(client.loop.stop)
+                    if client.thread and client.thread.is_alive():
+                        client.thread.join(timeout=2)
+
+    def run_connected(self, action):
+        client = MSMPClient(self.host, self.port, self.password, self.logger, self.config_manager)
+        loop_started = False
+        try:
+            client.start_background_loop()
+            loop_started = True
+            if not client.connect_sync():
+                return False, None
+            return True, action(client)
+        finally:
+            if loop_started:
+                try:
+                    if client.is_connected():
+                        client.close_sync()
+                finally:
+                    client.loop.call_soon_threadsafe(client.loop.stop)
+                    if client.thread and client.thread.is_alive():
+                        client.thread.join(timeout=2)
+
+    def is_connected(self) -> bool:
+        return bool(self._with_client(lambda _client: True))
+
+    def get_server_status_sync(self):
+        return self._with_client(lambda client: client.get_server_status_sync())
+
+    def get_game_rules_sync(self):
+        return self._with_client(lambda client: client.get_game_rules_sync())
+
+    def get_player_list_sync(self):
+        return self._with_client(lambda client: client.get_player_list_sync())
+
+    def send_request_sync(self, method: str, params: Any = None):
+        return self._with_client(lambda client: client.send_request_sync(method, params))
+
+    def execute_command_sync(self, command: str):
+        return self._with_client(lambda client: client.execute_command_sync(command))
+
+
 class RateLimiter:
     """命令速率限制器"""
     def __init__(self, default_cooldown: int = 3):
         self.default_cooldown = default_cooldown
         self.last_use = defaultdict(dict)
+        self._last_cleanup = 0
+        self.cleanup_interval = 300
+        self.entry_ttl = 3600
     
-    def can_use(self, user_id: int, command: str, cooldown: int = None) -> tuple:
-        """检查用户是否可以使用命令"""
+    def check(self, user_id: int, command: str, cooldown: int = None) -> tuple:
+        """只检查冷却，不写入使用时间。"""
         if cooldown is None:
             cooldown = self.default_cooldown
         
         now = time.time()
-        last_time = self.last_use[user_id].get(command, 0)
+        self._cleanup_expired(now)
+        last_time = self.last_use.get(user_id, {}).get(command, 0)
         elapsed = now - last_time
         
         if elapsed >= cooldown:
-            self.last_use[user_id][command] = now
             return True, None
+        remaining = max(1, int(cooldown - elapsed))
+        return False, remaining
+
+    def begin_use(self, user_id: int, command: str, cooldown: int = None) -> tuple:
+        """预占冷却，命令失败时用 reservation 回滚。"""
+        if cooldown is None:
+            cooldown = self.default_cooldown
+
+        now = time.time()
+        self._cleanup_expired(now)
+        user_commands = self.last_use[user_id]
+        previous_timestamp = user_commands.get(command)
+        elapsed = now - (previous_timestamp or 0)
+
+        if elapsed < cooldown:
+            remaining = max(1, int(cooldown - elapsed))
+            return False, remaining, None
+
+        user_commands[command] = now
+        return True, None, RateLimitReservation(user_id, command, now, previous_timestamp)
+
+    def commit(self, reservation: Optional[RateLimitReservation]):
+        """确认冷却预占。当前实现中预占时间就是最终使用时间。"""
+        return
+
+    def rollback(self, reservation: Optional[RateLimitReservation]):
+        """回滚未成功执行的冷却预占，避免异常/超时消耗冷却。"""
+        if not reservation:
+            return
+
+        command_times = self.last_use.get(reservation.user_id)
+        if not command_times:
+            return
+        if command_times.get(reservation.command) != reservation.timestamp:
+            return
+        if reservation.previous_timestamp is None:
+            del command_times[reservation.command]
+            if not command_times:
+                del self.last_use[reservation.user_id]
         else:
-            remaining = int(cooldown - elapsed)
-            return False, remaining
+            command_times[reservation.command] = reservation.previous_timestamp
+
+    def can_use(self, user_id: int, command: str, cooldown: int = None) -> tuple:
+        """兼容旧调用：检查通过时立即提交冷却。"""
+        can_use, remaining, _reservation = self.begin_use(user_id, command, cooldown)
+        return can_use, remaining
     
     def reset_user(self, user_id: int):
         """重置用户的所有冷却"""
         if user_id in self.last_use:
+            del self.last_use[user_id]
+
+    def _cleanup_expired(self, now: float):
+        if now - self._last_cleanup < self.cleanup_interval:
+            return
+
+        self._last_cleanup = now
+        expired_users = []
+        for user_id, command_times in self.last_use.items():
+            expired_commands = [
+                command for command, last_time in command_times.items()
+                if now - last_time > self.entry_ttl
+            ]
+            for command in expired_commands:
+                del command_times[command]
+            if not command_times:
+                expired_users.append(user_id)
+
+        for user_id in expired_users:
             del self.last_use[user_id]
 
 class CommandHandler:
@@ -56,7 +236,33 @@ class CommandHandler:
         self.logger = logger
         self.qq_server = qq_server
         self.commands: Dict[str, Command] = {}
+        self.msmp_client = None
+        self.rcon_client = None
         self.rate_limiter = RateLimiter(config_manager.get_command_cooldown())
+
+    async def _run_handler(self, handler: Callable, timeout: float, **kwargs):
+        """运行同步或异步命令处理器，并统一套超时。"""
+        if inspect.iscoroutinefunction(handler):
+            return await asyncio.wait_for(handler(**kwargs), timeout=timeout)
+
+        return await asyncio.wait_for(
+            asyncio.to_thread(handler, **kwargs),
+            timeout=timeout
+        )
+
+    def _build_handler_kwargs(self, command_args: str, user_id: int, group_id: int,
+                              target_context: Dict[str, Any], extra_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """合并命令处理参数，目标服务器上下文优先，避免重复关键字。"""
+        handler_kwargs = {
+            'command_text': command_args,
+            'user_id': user_id,
+            'group_id': group_id,
+        }
+        handler_kwargs.update(target_context)
+        for key, value in (extra_kwargs or {}).items():
+            if key not in handler_kwargs:
+                handler_kwargs[key] = value
+        return handler_kwargs
     
     def register_command(self, 
                         names: List[str], 
@@ -91,85 +297,126 @@ class CommandHandler:
                        **kwargs) -> Optional[str]:
         """处理命令执行"""
         command_text = command_text.strip().lower()
+        is_private = bool(kwargs.get('is_private', False))
+        from_console = bool(kwargs.get('from_console', False))
+        command_args, target_context = self._extract_target_server(command_args, user_id, group_id, is_private, from_console)
+        if target_context.get('server_access_denied'):
+            return "当前群聊/私聊没有权限操作该服务器"
+
+        target_rcon = self._build_target_rcon_client(target_context)
+        if target_rcon:
+            kwargs = dict(kwargs)
+            kwargs['rcon_client'] = target_rcon
+            target_context['target_rcon_client'] = target_rcon
+
+        target_msmp = self._build_target_msmp_client(target_context)
+        if target_msmp:
+            kwargs = dict(kwargs)
+            kwargs['msmp_client'] = target_msmp
+            target_context['target_msmp_client'] = target_msmp
         
-        self.logger.debug(f"处理命令: '{command_text}', 参数: '{command_args}', 用户: {user_id}")
+        self.logger.debug(
+            f"处理命令: '{command_text}', 参数: '{command_args}', "
+            f"目标服务器: {target_context.get('target_server_name')}, 用户: {user_id}"
+        )
         
-        # 第一步：检查是否是插件命令
-        if plugin_manager:
+        # 第一步：检查是否是插件命令。内置命令别名保留，避免插件覆盖核心控制命令。
+        builtin_command = self.commands.get(command_text)
+        if plugin_manager and not builtin_command:
             for cmd_name, cmd_info in plugin_manager.command_handlers.items():
-                cmd_names = cmd_info.get('names', [])
+                cmd_names = cmd_info.get('normalized_names') or {str(name).lower() for name in cmd_info.get('names', [])}
                 # 检查命令是否匹配（不区分大小写）
-                if command_text in [name.lower() for name in cmd_names]:
+                if command_text in cmd_names:
                     self.logger.debug(f"找到插件命令: {cmd_name}")
+                    if target_context.get('requires_server_selection'):
+                        return self._format_server_selection_hint(command_text, target_context.get('candidate_servers') or [])
                     
                     handler = cmd_info.get('handler')
                     admin_only = cmd_info.get('admin_only', False)
-                    is_admin = self.config_manager.is_admin(user_id)
+                    is_admin = self._is_effective_admin(
+                        user_id,
+                        target_context.get('target_server'),
+                        from_console
+                    )
                     
                     # 检查权限
                     if admin_only and not is_admin:
                         return "权限不足：此命令仅限管理员使用"
+
+                    if hasattr(plugin_manager, 'is_callable_enabled_for_server') and not plugin_manager.is_callable_enabled_for_server(
+                        handler, target_context.get('target_server')
+                    ):
+                        return f"当前服务器未启用此插件命令: {command_text}"
+
+                    cooldown = int(cmd_info.get('cooldown') or 0)
+                    rate_limit_key = self._rate_limit_key(cmd_name, target_context.get('target_server'))
+                    can_use, remaining, reservation = self.rate_limiter.begin_use(
+                        user_id,
+                        rate_limit_key,
+                        cooldown if cooldown > 0 else None
+                    )
+                    if not can_use:
+                        return f"命令冷却中，请等待 {remaining} 秒"
                     
                     # 执行插件命令
                     try:
-                        import asyncio
                         timeout = 60.0 if admin_only else 30.0
                         
-                        # 准备参数，避免重复传递
-                        plugin_kwargs = {
-                            'command_text': command_args,
-                            'user_id': user_id,
-                            'group_id': group_id,
-                        }
-                        # 添加其他参数，但避免覆盖已有的
-                        for key, value in kwargs.items():
-                            if key not in plugin_kwargs:
-                                plugin_kwargs[key] = value
-                        
-                        result = await asyncio.wait_for(
-                            handler(**plugin_kwargs),
-                            timeout=timeout
+                        plugin_kwargs = self._build_handler_kwargs(
+                            command_args, user_id, group_id, target_context, kwargs
                         )
+                        
+                        result = await self._run_handler(handler, timeout, **plugin_kwargs)
+                        self.rate_limiter.commit(reservation)
                         return result
                         
                     except asyncio.TimeoutError:
+                        self.rate_limiter.rollback(reservation)
                         self.logger.error(f"命令 {cmd_name} 执行超时 ({timeout}秒)")
                         return f"命令执行超时，请稍后重试"
                     except Exception as e:
+                        self.rate_limiter.rollback(reservation)
                         self.logger.error(f"执行插件命令 {cmd_name} 时出错: {e}", exc_info=True)
                         return f"命令执行失败: {str(e)}"
         
         # 第二步：检查内置命令
-        command = self.commands.get(command_text)
+        command = builtin_command
         
         if not command:
             self.logger.debug(f"未找到命令: '{command_text}'")
             return None
         
         self.logger.debug(f"找到命令: {command.names[0]}")
+        if target_context.get('requires_server_selection') and command.names[0] != 'status':
+            return self._format_server_selection_hint(command.names[0], target_context.get('candidate_servers') or [])
         
         # 检查命令是否可用
-        is_admin = self.config_manager.is_admin(user_id)
+        is_admin = self._is_effective_admin(
+            user_id,
+            target_context.get('target_server'),
+            from_console
+        )
         
         if command.admin_only:
             # 管理员命令权限检查
-            if not is_admin and not self.config_manager.is_admin_command_enabled(command.names[0]):
-                return f"命令 {command.names[0]} 已被禁用"
+            if not is_admin and not self._target_admin_command_enabled(target_context.get('target_server'), command.names[0]):
+                return f"命令 {command.names[0]} 未向普通成员开放"
         else:
             # 基础命令权限检查
             if not is_admin and command.command_key:
-                if not self.config_manager.is_command_enabled(command.command_key):
+                if not self._target_command_enabled(target_context.get('target_server'), command.command_key):
                     return None
         
         # 检查管理员权限
         if command.admin_only and not is_admin:
-            if not self.config_manager.is_admin_command_enabled(command.names[0]):
+            if not self._target_admin_command_enabled(target_context.get('target_server'), command.names[0]):
                 return "权限不足：此命令仅限管理员使用"
         
         # 检查冷却时间
-        can_use, remaining = self.rate_limiter.can_use(
+        rate_limit_key = self._rate_limit_key(command.names[0], target_context.get('target_server'))
+        can_use, remaining, reservation = self.rate_limiter.begin_use(
             user_id, 
-            command.names[0],
+            rate_limit_key,
             command.cooldown if command.cooldown > 0 else None
         )
         
@@ -178,30 +425,232 @@ class CommandHandler:
         
         # 执行命令
         try:
-            import asyncio
             timeout = 60.0 if command.admin_only and command.names[0] in ['start', 'stop', 'log', 'reconnect'] else 30.0
             
-            result = await asyncio.wait_for(
-                command.handler(
-                    user_id=user_id,
-                    group_id=group_id,
-                    command_text=command_args,
-                    **kwargs
-                ),
-                timeout=timeout
+            command_kwargs = self._build_handler_kwargs(
+                command_args, user_id, group_id, target_context, kwargs
             )
+            result = await self._run_handler(
+                command.handler,
+                timeout,
+                **command_kwargs
+            )
+            self.rate_limiter.commit(reservation)
             return result
             
         except asyncio.TimeoutError:
+            self.rate_limiter.rollback(reservation)
             self.logger.error(f"命令 {command.names[0]} 执行超时 ({timeout}秒)")
             return f"命令执行超时，请稍后重试"
         except Exception as e:
+            self.rate_limiter.rollback(reservation)
             self.logger.error(f"执行命令 {command.names[0]} 时出错: {e}", exc_info=True)
             return f"命令执行失败: {str(e)}"
 
-    def get_help_message(self, user_id: int, detailed: bool = False) -> str:
+    def _extract_target_server(self, command_args: str, user_id: int = 0, group_id: int = 0, is_private: bool = False, from_console: bool = False):
+        """从命令参数开头解析服务器编号或名称，并把上下文传给所有命令。"""
+        args = str(command_args or "").strip()
+        servers = self.config_manager.get_servers() if hasattr(self.config_manager, 'get_servers') else []
+        candidates = servers if from_console else self._context_servers(user_id, group_id, is_private)
+        if servers and not candidates and not from_console:
+            context = self._target_context({}, "")
+            context['server_access_denied'] = True
+            return args, context
+        if not args or not servers:
+            return args, self._implicit_target_context(candidates)
+
+        first, _, rest = args.partition(" ")
+        server = self._resolve_server_selector(first, candidates, from_console)
+        if server:
+            if not self._server_in_candidates(server, candidates):
+                context = self._target_context({}, first)
+                context['candidate_servers'] = candidates
+                context['server_access_denied'] = True
+                return rest.strip(), context
+            context = self._target_context(server, first)
+            context['candidate_servers'] = candidates
+            return rest.strip(), context
+
+        named_server, selector, named_rest = self._match_named_server_prefix(args, candidates or servers)
+        if named_server:
+            if not self._server_in_candidates(named_server, candidates):
+                context = self._target_context({}, selector)
+                context['candidate_servers'] = candidates
+                context['server_access_denied'] = True
+                return named_rest.strip(), context
+            context = self._target_context(named_server, selector)
+            context['candidate_servers'] = candidates
+            return named_rest.strip(), context
+
+        return args, self._implicit_target_context(candidates)
+
+    def _resolve_server_selector(self, selector: str, candidates: List[Dict[str, Any]], from_console: bool):
+        selector = str(selector or "").strip()
+        if not selector:
+            return None
+        if selector.isdigit():
+            source = self.config_manager.get_servers() if from_console and hasattr(self.config_manager, 'get_servers') else candidates
+            index = int(selector) - 1
+            if 0 <= index < len(source or []):
+                return dict(source[index])
+            return None
+        selector_lower = selector.lower()
+        for server in candidates or []:
+            if str(server.get('name') or '').lower() == selector_lower:
+                return dict(server)
+        if from_console and hasattr(self.config_manager, 'resolve_server'):
+            return self.config_manager.resolve_server(selector)
+        return None
+
+    def _match_named_server_prefix(self, args: str, servers: List[Dict[str, Any]]):
+        args = str(args or "").strip()
+        args_lower = args.lower()
+        for server in sorted(servers or [], key=lambda item: len(str(item.get('name') or '')), reverse=True):
+            name = str(server.get('name') or '').strip()
+            if not name:
+                continue
+            name_lower = name.lower()
+            if args_lower == name_lower:
+                return dict(server), name, ""
+            if args_lower.startswith(name_lower + " "):
+                return dict(server), name, args[len(name):].strip()
+        return None, "", args
+
+    def _context_servers(self, user_id: int, group_id: int, is_private: bool):
+        if hasattr(self.config_manager, 'resolve_servers_for_context'):
+            return self.config_manager.resolve_servers_for_context(user_id, group_id, is_private)
+        return []
+
+    def _implicit_target_context(self, candidates):
+        if len(candidates) == 1:
+            context = self._target_context(candidates[0], "")
+            context['candidate_servers'] = candidates
+            return context
+        context = self._target_context({}, "")
+        context['candidate_servers'] = candidates
+        if len(candidates) > 1:
+            context['requires_server_selection'] = True
+        return context
+
+    def _server_in_candidates(self, server, candidates) -> bool:
+        target_file = server.get('_config_file')
+        target_name = str(server.get('name', '')).lower()
+        for candidate in candidates:
+            if target_file and candidate.get('_config_file') == target_file:
+                return True
+            if target_name and str(candidate.get('name', '')).lower() == target_name:
+                return True
+        return False
+
+    def _target_context(self, server, selector: str):
+        server = server or {}
+        return {
+            'target_server': server,
+            'target_server_selector': selector,
+            'target_server_name': server.get('name', 'server1') if server else ''
+        }
+
+    def _format_server_selection_hint(self, command_text: str, servers: List[Dict[str, Any]]) -> str:
+        lines = ["当前可操作多个服务器，请在命令后指定服务器编号或名称。", ""]
+        for index, server in enumerate(servers, 1):
+            name = server.get('name') or f'server{index}'
+            lines.append(f"{index}. {name}：{command_text} {index} 或 {command_text} {name}")
+        return "\n".join(lines)
+
+    def _rate_limit_key(self, command_name: str, target_server: Optional[Dict[str, Any]]) -> str:
+        server_key = (target_server or {}).get('_config_file') or (target_server or {}).get('name') or 'default'
+        return f"{command_name}:{server_key}"
+
+    def _target_command_enabled(self, target_server: Optional[Dict[str, Any]], command_name: str) -> bool:
+        commands = (target_server or {}).get('commands') or {}
+        enabled = commands.get('enabled_commands') or {}
+        return enabled.get(command_name, True)
+
+    def _target_admin_command_enabled(self, target_server: Optional[Dict[str, Any]], command_name: str) -> bool:
+        commands = (target_server or {}).get('commands') or {}
+        enabled = commands.get('enabled_admin_commands') or {}
+        return enabled.get(command_name, False)
+
+    def _target_protocol_enabled(self, target_server: Optional[Dict[str, Any]], protocol: str) -> bool:
+        protocol_config = (target_server or {}).get(protocol) or {}
+        if protocol == 'msmp':
+            return bool(protocol_config.get('enabled', False))
+        if protocol == 'rcon':
+            return bool(protocol_config.get('enabled', False))
+        return False
+
+    def _target_is_active_server(self, target_server: Optional[Dict[str, Any]]) -> bool:
+        if not target_server or not self.qq_server:
+            return False
+        active_server = getattr(self.qq_server, 'active_server_config', None) or {}
+        return self._same_server_config(target_server, active_server)
+
+    @staticmethod
+    def _same_server_config(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        left_key = (left or {}).get('_config_file') or (left or {}).get('name')
+        right_key = (right or {}).get('_config_file') or (right or {}).get('name')
+        return bool(left_key and right_key and str(left_key).lower() == str(right_key).lower())
+
+    def _build_target_rcon_client(self, target_context):
+        server = target_context.get('target_server') or {}
+        if not server:
+            return None
+        if self._target_is_active_server(server):
+            return None
+
+        rcon_config = server.get('rcon') or {}
+        if not rcon_config.get('enabled', False):
+            return None
+        port = rcon_config.get('port')
+        host = rcon_config.get('host') or 'localhost'
+        password = rcon_config.get('password')
+        if not port or not password:
+            return None
+        return PerCallRCONClient(host, int(port), password, self.logger)
+
+    def _build_target_msmp_client(self, target_context):
+        server = target_context.get('target_server') or {}
+        if not server:
+            return None
+        if self._target_is_active_server(server):
+            return None
+
+        msmp_config = server.get('msmp') or {}
+        if not msmp_config.get('enabled', False):
+            return None
+        port = msmp_config.get('port')
+        host = msmp_config.get('host') or 'localhost'
+        password = msmp_config.get('password')
+        if not port or not password:
+            return None
+        return PerCallMSMPClient(host, int(port), password, self.logger, self.config_manager)
+
+    @staticmethod
+    def _server_command_config(target_server: Optional[Dict[str, Any]], key: str, default: Any) -> Any:
+        commands = (target_server or {}).get('commands') or {}
+        return commands.get(key, default)
+
+    def _is_effective_admin(
+        self,
+        user_id: int,
+        target_server: Optional[Dict[str, Any]] = None,
+        from_console: bool = False
+    ) -> bool:
+        """本机 GUI/控制台始终视为管理员；QQ 侧按服务器 admins 判断。"""
+        if from_console:
+            return True
+        return self.config_manager.is_server_admin(user_id, target_server)
+
+    def get_help_message(
+        self,
+        user_id: int,
+        detailed: bool = False,
+        target_server: Optional[Dict[str, Any]] = None,
+        from_console: bool = False
+    ) -> str:
         """获取帮助消息"""
-        is_admin = self.config_manager.is_admin(user_id)
+        target_server = target_server or {}
+        is_admin = self._is_effective_admin(user_id, target_server, from_console)
         
         basic_commands = []
         admin_commands = []
@@ -216,11 +665,11 @@ class CommandHandler:
                     if is_admin:
                         admin_commands.append(command)
                     else:
-                        # 检查这个管理员命令是否对非管理员开放
-                        if self.config_manager.is_admin_command_enabled(command.names[0]):
+                        # 检查这个管理员命令是否在目标服务器对非管理员开放
+                        if self._target_admin_command_enabled(target_server, command.names[0]):
                             enabled_admin_commands.append(command)
                 else:
-                    if is_admin or (command.command_key and self.config_manager.is_command_enabled(command.command_key)):
+                    if is_admin or (command.command_key and self._target_command_enabled(target_server, command.command_key)):
                         basic_commands.append(command)
         
         lines = ["MSMP_QQBot 命令帮助", "••••••••••"]
@@ -255,12 +704,13 @@ class CommandHandler:
             lines.append("\n【直接命令执行】")
             lines.append("• !<命令>")
             lines.append("  使用 ! 前缀直接执行服务器命令")
-            lines.append("  示例: !say Hello 或 !give @a diamond")
+            lines.append("  示例: !say Hello、!1 say Hello 或 !server1 say Hello")
         
         # ========== 添加自定义指令信息 ==========
-        if self.config_manager.is_custom_commands_enabled():
+        custom_commands_config = target_server.get('custom_commands') or {}
+        if custom_commands_config.get('enabled', False):
             try:
-                custom_rules = self.config_manager.get_custom_command_rules()
+                custom_rules = custom_commands_config.get('rules', [])
                 
                 if custom_rules:
                     # 按权限过滤自定义指令
@@ -299,9 +749,10 @@ class CommandHandler:
                 pass
         
         # ========== 添加自定义消息监听器信息 ==========
-        if self.config_manager.is_custom_listeners_enabled():
+        custom_listeners_config = target_server.get('custom_listeners') or {}
+        if custom_listeners_config.get('enabled', False):
             try:
-                listener_rules = self.config_manager.get_custom_listener_rules()
+                listener_rules = custom_listeners_config.get('rules', [])
                 
                 if listener_rules:
                     enabled_listeners = [r for r in listener_rules if r.get('enabled', True)]
@@ -354,6 +805,7 @@ class CommandHandlers:
         self.logger = logger
         self._stop_lock = asyncio.Lock()
         self._is_stopping = False
+        self._stopping_servers = set()
         self._shutdown_event = asyncio.Event()
         self._shutdown_initiated = False
     
@@ -366,15 +818,41 @@ class CommandHandlers:
         """设置关闭模式，停止所有连接检测"""
         self._shutdown_event.set()
         self._is_stopping = True
+        self._stopping_servers.add(self._server_operation_key())
         self.logger.info("已进入关闭模式，停止所有连接检测")
+
+    def _server_operation_key(self, target_server: Optional[Dict[str, Any]] = None) -> str:
+        if target_server:
+            return str(target_server.get('_config_file') or target_server.get('name') or 'default')
+        active_server = getattr(self.qq_server, 'active_server_config', None) if self.qq_server else None
+        return str((active_server or {}).get('_config_file') or (active_server or {}).get('name') or 'default')
     
     async def handle_list(self, **kwargs) -> str:
         """处理list命令"""
         try:
-            client_type, client = await self.qq_server.connection_manager.get_preferred_client()
+            target_server = kwargs.get('target_server') or {}
+            target_is_active = self._target_is_active_server(target_server)
+            target_msmp = (
+                kwargs.get('target_msmp_client') or
+                kwargs.get('msmp_client')
+            )
+            target_rcon = (
+                kwargs.get('target_rcon_client') or
+                kwargs.get('rcon_client')
+            )
+            if target_msmp:
+                client_type, client = 'msmp', target_msmp
+            elif target_rcon:
+                client_type, client = 'rcon', target_rcon
+            elif target_is_active:
+                client_type, client = await self.qq_server.connection_manager.get_preferred_client()
+            else:
+                client_type, client = None, None
             
             # 如果没有连接，尝试自动重连一次
             if not client:
+                if not target_is_active:
+                    return "目标服务器连接未就绪，请检查该服务器的 MSMP/RCON 配置"
                 self.logger.info("检测到连接未就绪，尝试自动重连...")
                 await self.qq_server.connection_manager.reconnect_all()
                 
@@ -386,9 +864,9 @@ class CommandHandlers:
             
             try:
                 if client_type == 'msmp':
-                    player_info = client.get_player_list_sync()
+                    player_info = await asyncio.to_thread(client.get_player_list_sync)
                 else:
-                    player_info = client.get_player_list()
+                    player_info = await asyncio.to_thread(client.get_player_list)
             except Exception as e:
                 self.logger.error(f"获取玩家列表失败: {e}")
                 return f"获取玩家列表失败: {str(e)}"
@@ -411,13 +889,23 @@ class CommandHandlers:
     async def handle_tps(self, **kwargs) -> str:
         """处理tps命令"""
         try:
-            if not self.config_manager.is_rcon_enabled():
+            target_server = kwargs.get('target_server') or {}
+            target_is_active = self._target_is_active_server(target_server)
+            if not self._target_protocol_enabled(target_server, 'rcon'):
                 return "TPS查询需要启用RCON连接"
 
-            client_type, client = await self.qq_server.connection_manager.get_client_for_command("tps")
+            target_rcon = kwargs.get('target_rcon_client') or kwargs.get('rcon_client')
+            if target_rcon:
+                client_type, client = 'rcon', target_rcon
+            elif target_is_active:
+                client_type, client = await self.qq_server.connection_manager.get_client_for_command("tps")
+            else:
+                client_type, client = None, None
             
             # 如果没有RCON连接，尝试自动重连一次
             if not client or client_type != 'rcon':
+                if not target_is_active:
+                    return "TPS命令需要目标服务器的RCON连接，请检查该服务器RCON配置"
                 self.logger.info("检测到RCON连接未就绪，尝试自动重连...")
                 await self.qq_server.connection_manager.reconnect_rcon()
                 
@@ -427,8 +915,8 @@ class CommandHandlers:
                 if not client or client_type != 'rcon':
                     return "TPS命令需要RCON连接\n自动重连失败，请使用 reconnect_rcon 重连"
             
-            tps_command = self.config_manager.get_tps_command()
-            result = client.execute_command(tps_command)
+            tps_command = self._target_command_config(target_server, 'tps_command', self.config_manager.get_tps_command())
+            result = await asyncio.to_thread(client.execute_command, tps_command)
             
             if result:
                 # 第一步：清理Minecraft颜色代码 (§[0-9a-fk-or] 或 &[0-9a-fk-or])
@@ -438,7 +926,7 @@ class CommandHandlers:
                 self.logger.debug(f"清理后的TPS返回: {cleaned}")
                 
                 # 第二步：尝试使用正则表达式提取TPS值
-                tps_value = self._extract_tps_value(cleaned)
+                tps_value = self._extract_tps_value(cleaned, target_server)
                 
                 # 第三步：构建响应消息
                 message_lines = ["服务器TPS信息:"]
@@ -453,13 +941,13 @@ class CommandHandlers:
                     # 当无法解析时，记录调试信息
                     self.logger.warning(
                         f"TPS值解析失败\n"
-                        f"正则表达式: {self.config_manager.get_tps_regex()}\n"
-                        f"捕获组索引: {self.config_manager.get_tps_group_index()}\n"
+                        f"正则表达式: {self._target_command_config(target_server, 'tps_regex', self.config_manager.get_tps_regex())}\n"
+                        f"捕获组索引: {self._target_command_config(target_server, 'tps_group_index', self.config_manager.get_tps_group_index())}\n"
                         f"清理后的文本: {cleaned}"
                     )
                 
                 # 第四步：是否显示原始输出
-                if self.config_manager.is_tps_raw_output_enabled():
+                if self._target_command_config(target_server, 'tps_show_raw_output', self.config_manager.is_tps_raw_output_enabled()):
                     message_lines.append("")
                     message_lines.append("服务器原始TPS信息:")
                     message_lines.append("-" * 20)
@@ -476,11 +964,29 @@ class CommandHandlers:
             self.logger.error(f"执行TPS命令失败: {e}", exc_info=True)
             return f"获取TPS信息失败: {e}"
 
-    def _extract_tps_value(self, text: str) -> Optional[float]:
+    def _target_command_config(self, target_server: Dict[str, Any], key: str, default: Any) -> Any:
+        commands = (target_server or {}).get('commands') or {}
+        return commands.get(key, default)
+
+    def _target_is_active_server(self, target_server: Optional[Dict[str, Any]]) -> bool:
+        if not target_server or not self.qq_server:
+            return False
+        active_server = getattr(self.qq_server, 'active_server_config', None) or {}
+        return self._same_server_config(target_server, active_server)
+
+    @staticmethod
+    def _target_protocol_enabled(target_server: Optional[Dict[str, Any]], protocol: str) -> bool:
+        protocol_config = (target_server or {}).get(protocol) or {}
+        if protocol in ('msmp', 'rcon'):
+            return bool(protocol_config.get('enabled', False))
+        return False
+
+    def _extract_tps_value(self, text: str, target_server: Optional[Dict[str, Any]] = None) -> Optional[float]:
         """从服务器返回的文本中提取TPS值"""
         try:
-            tps_regex = self.config_manager.get_tps_regex()
-            tps_group_index = self.config_manager.get_tps_group_index()
+            target_server = target_server or {}
+            tps_regex = self._target_command_config(target_server, 'tps_regex', self.config_manager.get_tps_regex())
+            tps_group_index = self._target_command_config(target_server, 'tps_group_index', self.config_manager.get_tps_group_index())
             
             # 验证group_index的有效性
             if tps_group_index < 1:
@@ -578,12 +1084,22 @@ class CommandHandlers:
     async def handle_rules(self, **kwargs) -> str:
         """处理rules命令"""
         try:
-            if not self.config_manager.is_msmp_enabled():
+            target_server = kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None) or {}
+            target_is_active = self._target_is_active_server(target_server)
+            if not self._target_protocol_enabled(target_server, 'msmp'):
                 return "规则查询需要启用MSMP连接"
-            
-            client_type, client = await self.qq_server.connection_manager.ensure_connected()
-            
-            if not client or client_type != 'msmp':
+
+            client = kwargs.get('target_msmp_client') or kwargs.get('msmp_client')
+            if not client and target_is_active:
+                client = self.msmp_client
+            if not client:
+                if not target_is_active:
+                    return "目标服务器MSMP连接未就绪，请检查该服务器MSMP配置"
+                client_type, client = await self.qq_server.connection_manager.ensure_connected()
+                if client_type != 'msmp':
+                    client = None
+
+            if not client:
                 return "MSMP连接未就绪\n请使用 #reconnect_msmp 手动重连"
             
             self.logger.info("查询服务器规则...")
@@ -591,7 +1107,7 @@ class CommandHandlers:
             lines = ["服务器规则信息", "=" * 20]
             
             try:
-                gamerules_result = await self.msmp_client.get_game_rules()
+                gamerules_result = await asyncio.to_thread(client.get_game_rules_sync)
                 
                 if 'result' in gamerules_result and isinstance(gamerules_result['result'], list):
                     gamerules_list = gamerules_result['result']
@@ -644,7 +1160,10 @@ class CommandHandlers:
                     settings_found = False
                     for setting_key, setting_name in server_settings.items():
                         try:
-                            result = await self.msmp_client.send_request(f"serversettings/{setting_key}")
+                            result = await asyncio.to_thread(
+                                client.send_request_sync,
+                                f"serversettings/{setting_key}"
+                            )
                             
                             if 'result' in result:
                                 if not settings_found:
@@ -713,20 +1232,93 @@ class CommandHandlers:
             return f"查询服务器规则失败: {e}"
     
     async def handle_status(self, **kwargs) -> str:
-        """处理status命令"""
+        """处理status命令：按当前群聊/私聊上下文聚合可操作服务器。"""
+        try:
+            explicit_selector = str(kwargs.get('target_server_selector') or '').strip()
+            explicit_target = kwargs.get('target_server') or {}
+            if explicit_selector and explicit_target:
+                status_servers = [explicit_target]
+            else:
+                status_servers = [server for server in (kwargs.get('candidate_servers') or []) if server]
+            if not status_servers:
+                target_server = kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None) or {}
+                status_servers = [target_server] if target_server else []
+
+            if len(status_servers) <= 1:
+                single_kwargs = self._status_kwargs_for_server(status_servers[0] if status_servers else {}, kwargs)
+                return await self._handle_single_status(include_qq=True, **single_kwargs)
+
+            qq_status = "已连接" if self.qq_server.is_connected() else "未连接"
+            lines = ["系统状态总览", "■■■■■■■■■■■■■■■", f"QQ机器人: {qq_status}"]
+            for index, server in enumerate(status_servers, 1):
+                single_kwargs = self._status_kwargs_for_server(server, kwargs)
+                lines.append("")
+                lines.append(f"【{index}. {server.get('name') or f'server{index}'}】")
+                lines.append(await self._handle_single_status(include_qq=False, **single_kwargs))
+            return "\n".join(lines)
+        except Exception as e:
+            self.logger.error(f"执行status命令失败: {e}", exc_info=True)
+            return f"获取状态失败: {e}"
+
+    def _status_kwargs_for_server(self, target_server: Dict[str, Any], base_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """为聚合 status 构建单个服务器的连接上下文。"""
+        result = dict(base_kwargs)
+        result['target_server'] = target_server or {}
+        active_server = getattr(self.qq_server, 'active_server_config', None) or {}
+        if target_server and not self._same_server_config(target_server, active_server):
+            result.pop('msmp_client', None)
+            result.pop('rcon_client', None)
+            result['target_msmp_client'] = self._build_status_msmp_client(target_server)
+            result['target_rcon_client'] = self._build_status_rcon_client(target_server)
+        return result
+
+    def _build_status_rcon_client(self, target_server: Dict[str, Any]):
+        rcon_config = (target_server or {}).get('rcon') or {}
+        if not rcon_config.get('enabled', False):
+            return None
+        port = rcon_config.get('port')
+        password = rcon_config.get('password')
+        if not port or not password:
+            return None
+        return PerCallRCONClient(rcon_config.get('host') or 'localhost', int(port), password, self.logger)
+
+    def _build_status_msmp_client(self, target_server: Dict[str, Any]):
+        msmp_config = (target_server or {}).get('msmp') or {}
+        if not msmp_config.get('enabled', False):
+            return None
+        port = msmp_config.get('port')
+        password = msmp_config.get('password')
+        if not port or not password:
+            return None
+        return PerCallMSMPClient(
+            msmp_config.get('host') or 'localhost',
+            int(port),
+            password,
+            self.logger,
+            self.config_manager
+        )
+
+    async def _handle_single_status(self, include_qq: bool = True, **kwargs) -> str:
+        """生成单个服务器状态。"""
         try:
             qq_status = "已连接" if self.qq_server.is_connected() else "未连接"
+            active_server = getattr(self.qq_server, 'active_server_config', None) or {}
+            target_server = kwargs.get('target_server') or active_server
+            active_server_name = active_server.get('name', '默认服务器')
+            target_server_name = target_server.get('name') or active_server_name
+            target_msmp = kwargs.get('target_msmp_client') or kwargs.get('msmp_client')
+            target_rcon = kwargs.get('target_rcon_client') or kwargs.get('rcon_client')
+            target_is_active = not target_server or self._same_server_config(target_server, active_server)
             
             msmp_status = "未启用"
             msmp_connected = False
-            if self.config_manager.is_msmp_enabled():
-                if not self.msmp_client:
+            if self._target_protocol_enabled(target_server, 'msmp'):
+                msmp_for_status = target_msmp or (self.msmp_client if target_is_active else None)
+                if not msmp_for_status:
                     msmp_status = "客户端未初始化"
-                elif not self.msmp_client.is_connected():
-                    msmp_status = "未连接"
                 else:
                     try:
-                        status = self.msmp_client.get_server_status_sync()
+                        status = await asyncio.to_thread(msmp_for_status.get_server_status_sync)
                         version = status.get('version', {})
                         version_name = version.get('name', 'Unknown')
                                             
@@ -740,8 +1332,23 @@ class CommandHandlers:
             
             rcon_status = "未启用"
             rcon_connected = False
-            if self.config_manager.is_rcon_enabled():
-                if not self.rcon_client:
+            rcon_player_info = None
+            if self._target_protocol_enabled(target_server, 'rcon'):
+                if target_rcon:
+                    try:
+                        if isinstance(target_rcon, PerCallRCONClient):
+                            rcon_connected, rcon_player_info = await asyncio.to_thread(
+                                target_rcon.run_connected,
+                                lambda client: client.get_player_list()
+                            )
+                        else:
+                            rcon_connected = await asyncio.to_thread(target_rcon.is_connected)
+                        rcon_status = "运行中" if rcon_connected else "未连接"
+                    except Exception as e:
+                        rcon_status = f"连接异常: {e}"
+                elif not target_is_active:
+                    rcon_status = "客户端未初始化"
+                elif not self.rcon_client:
                     rcon_status = "客户端未初始化"
                 elif not self.rcon_client.is_connected():
                     rcon_status = "未连接"
@@ -758,52 +1365,94 @@ class CommandHandlers:
             # 添加 Minecraft 服务器状态
             mc_server_status = "未启动"
             server_process_running = False
+            target_process = (
+                self.qq_server.get_server_process(target_server)
+                if self.qq_server and hasattr(self.qq_server, 'get_server_process') and target_server
+                else (self.qq_server.server_process if self.qq_server else None)
+            )
+            player_client_type = None
+            player_client = None
+            if msmp_connected and target_msmp:
+                player_client_type, player_client = 'msmp', target_msmp
+            elif rcon_connected and target_rcon:
+                player_client_type, player_client = 'rcon', target_rcon
             
-            if self.qq_server and self.qq_server.server_process:
-                if self.qq_server.server_process.poll() is None:
+            if self.qq_server and target_process:
+                if target_process.poll() is None:
                     # 服务器进程正在运行
                     server_process_running = True
                     try:
                         # 尝试获取更详细的状态
-                        client_type, client = await self.qq_server.connection_manager.ensure_connected()
+                        if player_client:
+                            client_type, client = player_client_type, player_client
+                        elif target_is_active:
+                            client_type, client = await self.qq_server.connection_manager.ensure_connected()
+                        else:
+                            client_type, client = None, None
                         if client:
                             if client_type == 'msmp':
-                                player_info = self.msmp_client.get_player_list_sync()
+                                player_info = await asyncio.to_thread(client.get_player_list_sync)
                                 mc_server_status = (
-                                    f"运行中 (PID: {self.qq_server.server_process.pid})\n"
+                                    f"{target_server_name} 运行中 (PID: {target_process.pid})\n"
                                     f"在线: {player_info.current_players}/{player_info.max_players}"
                                 )
                             elif client_type == 'rcon':
-                                player_info = self.rcon_client.get_player_list()
+                                rcon_for_status = client
+                                player_info = rcon_player_info or await asyncio.to_thread(rcon_for_status.get_player_list)
                                 mc_server_status = (
-                                    f"运行中 (PID: {self.qq_server.server_process.pid})\n"
+                                    f"{target_server_name} 运行中 (PID: {target_process.pid})\n"
                                     f"在线: {player_info.current_players}/{player_info.max_players}"
                                 )
                             else:
-                                mc_server_status = f"运行中 (PID: {self.qq_server.server_process.pid})"
+                                mc_server_status = f"{target_server_name} 运行中 (PID: {target_process.pid})"
                         else:
-                            mc_server_status = f"运行中 (PID: {self.qq_server.server_process.pid}) - 连接异常"
+                            mc_server_status = f"{target_server_name} 运行中 (PID: {target_process.pid}) - 连接异常"
                     except Exception as e:
-                        mc_server_status = f"运行中 (PID: {self.qq_server.server_process.pid}) - 状态获取失败"
+                        mc_server_status = f"运行中 (PID: {target_process.pid}) - 状态获取失败"
                 else:
-                    return_code = self.qq_server.server_process.poll()
+                    return_code = target_process.poll()
                     mc_server_status = f"已停止 (退出码: {return_code})"
             else:
                 # 服务器进程未运行，但可能有外部接入
                 if external_access:
                     mc_server_status = "运行中 (外部接入)"
+                    try:
+                        if player_client:
+                            client_type, client = player_client_type, player_client
+                        elif target_is_active:
+                            client_type, client = await self.qq_server.connection_manager.get_preferred_client()
+                        else:
+                            client_type, client = None, None
+                        if client_type == 'msmp':
+                            player_info = await asyncio.to_thread(client.get_player_list_sync)
+                            mc_server_status = (
+                                f"{target_server_name} 运行中 (外部接入)\n"
+                                f"在线: {player_info.current_players}/{player_info.max_players}"
+                            )
+                        elif client_type == 'rcon':
+                            player_info = rcon_player_info or await asyncio.to_thread(client.get_player_list)
+                            mc_server_status = (
+                                f"{target_server_name} 运行中 (外部接入)\n"
+                                f"在线: {player_info.current_players}/{player_info.max_players}"
+                            )
+                    except Exception as e:
+                        self.logger.debug(f"获取外部接入服务器状态失败: {e}")
                 else:
                     mc_server_status = "未启动"
             
             # 构建状态信息
-            status_lines = [
-                "系统状态总览",
-                "■■■■■■■■■■■■■■■",
-                f"QQ机器人: {qq_status}",
+            status_lines = []
+            if include_qq:
+                status_lines.extend([
+                    "系统状态总览",
+                    "■■■■■■■■■■■■■■■",
+                    f"QQ机器人: {qq_status}",
+                ])
+            status_lines.extend([
                 f"MC服务器: {mc_server_status}",
                 f"MSMP连接: {msmp_status}",
                 f"RCON连接: {rcon_status}"
-            ]
+            ])
             
             # 添加外部接入提示（当有外部接入但服务器进程未运行时）
             if external_access and not server_process_running:
@@ -835,58 +1484,98 @@ class CommandHandlers:
     async def handle_help(self, user_id: int, **kwargs) -> str:
         """处理help命令"""
         if hasattr(self.qq_server, 'command_handler'):
-            return self.qq_server.command_handler.get_help_message(user_id)
+            return self.qq_server.command_handler.get_help_message(
+                user_id,
+                target_server=kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None),
+                from_console=bool(kwargs.get('from_console', False))
+            )
         return "帮助系统未初始化"
     
     async def handle_stop(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理stop命令(管理员) - 支持MSMP和RCON"""
-        
-        async with self._stop_lock:
-            if self._is_stopping:
-                return "服务器已在停止中，请勿重复执行"
-            
-            self._is_stopping = True
-        
+        stop_key = self._server_operation_key(kwargs.get('target_server') or {})
         try:
-            # 先检查服务器是否在运行
-            if not self.qq_server or not self.qq_server.server_process:
-                self._is_stopping = False
+            if not self.qq_server:
+                return "服务器未运行"
+
+            server_selector = str(kwargs.get('target_server_selector', '') or '').strip()
+            requested_server = kwargs.get('target_server') or (
+                self.config_manager.resolve_server(server_selector) if server_selector else {}
+            )
+            if server_selector and not requested_server:
+                return f"未找到服务器: {server_selector}"
+            stop_key = self._server_operation_key(requested_server)
+
+            async with self._stop_lock:
+                if stop_key in self._stopping_servers:
+                    return "服务器已在停止中，请勿重复执行"
+                self._stopping_servers.add(stop_key)
+
+            active_server = getattr(self.qq_server, 'active_server_config', None) or {}
+            target_is_active = not requested_server or self._same_server_config(requested_server, active_server)
+            target_process = (
+                self.qq_server.get_server_process(requested_server)
+                if hasattr(self.qq_server, 'get_server_process') and requested_server
+                else self.qq_server.server_process
+            )
+            local_process_running = (
+                target_process and
+                target_process.poll() is None
+            )
+
+            target_msmp = kwargs.get('target_msmp_client') or kwargs.get('msmp_client')
+            target_rcon = kwargs.get('target_rcon_client') or kwargs.get('rcon_client')
+            if target_msmp:
+                client_type, client = 'msmp', target_msmp
+            elif target_rcon:
+                client_type, client = 'rcon', target_rcon
+            elif target_is_active:
+                client_type, client = await self.qq_server.connection_manager.ensure_connected()
+            else:
+                client_type, client = None, None
+            
+            # 外部接入没有本地 server_process，仍允许通过 RCON/MSMP 停止。
+            if not local_process_running and not client:
                 return "服务器未运行"
             
-            if self.qq_server.server_process.poll() is not None:
-                self._is_stopping = False
-                return "服务器已经停止"
-            
-            if is_private:
-                await self.qq_server.send_private_message(websocket, user_id, "正在停止服务器...")
-            else:
-                await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
+            if websocket:
+                if is_private:
+                    await self.qq_server.send_private_message(websocket, user_id, "正在停止服务器...")
+                else:
+                    await self.qq_server.send_group_message(websocket, group_id, "正在停止服务器...")
             
             # ============ 触发服务器停止事件 ============
             if hasattr(self.qq_server, 'plugin_manager') and self.qq_server.plugin_manager:
                 self.logger.info("触发 server_stopping 事件给所有插件")
-                await self.qq_server.plugin_manager.trigger_event("server_stopping")
+                event_server = kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None) or {}
+                await self.qq_server.plugin_manager.trigger_event(
+                    "server_stopping",
+                    target_server=event_server,
+                    target_server_name=event_server.get('name', '')
+                )
             # ============ 事件触发结束 ============
             
-            # 第一步：立即设置服务器停止标志，停止日志采集
-            self.qq_server.server_stopping = True
+            # 只有停止当前Bot托管的服务器时，才暂停本地日志采集。
+            if requested_server and hasattr(self.qq_server, 'set_server_stopping'):
+                self.qq_server.set_server_stopping(requested_server, True)
+            elif target_is_active:
+                self.qq_server.server_stopping = True
             
             # 第二步：先尝试通过连接发送停止命令（在关闭连接之前）
             stop_success = False
             
             try:
-                # 使用连接管理器获取客户端
-                client_type, client = await self.qq_server.connection_manager.ensure_connected()
-                
                 if client:
                     if client_type == 'msmp':
-                        result = client.execute_command_sync("server/stop")
+                        result = await asyncio.to_thread(client.execute_command_sync, "server/stop")
                         if 'result' in result:
                             stop_success = True
                             self.logger.info("MSMP 停止命令已发送")
                     
                     elif client_type == 'rcon':
-                        result = client.execute_command("stop")
+                        result = await asyncio.to_thread(client.execute_command, "stop")
+                        if result is None:
+                            raise RuntimeError("RCON未返回停止命令响应")
                         stop_success = True
                         self.logger.info("RCON停止命令已发送")
                 else:
@@ -898,78 +1587,101 @@ class CommandHandlers:
             # 第三步：如果无法通过连接停止，尝试通过标准输入发送停止命令
             if not stop_success:
                 try:
-                    if (self.qq_server.server_process and 
-                        self.qq_server.server_process.poll() is None and
-                        self.qq_server.server_process.stdin):
+                    if (local_process_running and
+                        target_process and
+                        target_process.poll() is None and
+                        target_process.stdin):
                         
                         stop_command = "stop\n"
-                        self.qq_server.server_process.stdin.write(stop_command.encode('utf-8'))
-                        self.qq_server.server_process.stdin.flush()
+                        target_process.stdin.write(stop_command.encode('utf-8'))
+                        target_process.stdin.flush()
                         self.logger.info("已通过标准输入发送停止命令")
                         stop_success = True
                 except Exception as e:
                     self.logger.warning(f"通过标准输入发送停止命令失败: {e}")
+
+            if not stop_success:
+                if requested_server and hasattr(self.qq_server, 'set_server_stopping'):
+                    self.qq_server.set_server_stopping(requested_server, False)
+                elif target_is_active:
+                    self.qq_server.server_stopping = False
+                return "无法发送停止命令：RCON/MSMP未成功执行，且没有可用的本地标准输入"
             
-            # 第四步：立即彻底关闭所有连接
-            await self._thorough_shutdown()
+            # 第四步：停止当前活动服务器时才关闭全局连接，避免 stop 2 误断 server1。
+            if target_is_active:
+                await self._thorough_shutdown()
             
-            self.logger.info("停止命令已发送，等待服务器关闭进程...")
+            if local_process_running:
+                self.logger.info("停止命令已发送，等待服务器关闭进程...")
+            else:
+                self.logger.info("外部接入服务器停止命令已发送")
             
             # 等待服务器关闭
             max_wait_time = 60
             wait_interval = 5
             waited_time = 0
             
-            while (waited_time < max_wait_time and 
-                   self.qq_server.server_process and 
-                   self.qq_server.server_process.poll() is None):
+            while (local_process_running and
+                   waited_time < max_wait_time and 
+                   target_process and 
+                   target_process.poll() is None):
                 await asyncio.sleep(wait_interval)
                 waited_time += wait_interval
                 self.logger.info(f"等待服务器关闭... ({waited_time}/{max_wait_time}秒)")
             
             # 检查服务器是否已关闭
             server_stopped = True
-            if self.qq_server.server_process:
-                return_code = self.qq_server.server_process.poll()
+            if local_process_running and target_process:
+                return_code = target_process.poll()
                 if return_code is None:
                     server_stopped = False
                     self.logger.warning(f"服务器进程在{max_wait_time}秒后仍未关闭")
+                    if requested_server and hasattr(self.qq_server, 'set_server_stopping'):
+                        self.qq_server.set_server_stopping(requested_server, False)
+                    elif target_is_active:
+                        self.qq_server.server_stopping = False
                 else:
                     self.logger.info(f"服务器进程已关闭，返回码: {return_code}")
             
             # 给日志采集任务一点时间读取剩余输出
             await asyncio.sleep(2)
             
-            result_message = "服务器已成功关闭" if server_stopped else "停止命令已发送，但服务器进程仍在运行中。可能需要手动检查或使用 #kill 命令强制停止"
-            print(result_message)
+            if local_process_running:
+                result_message = "服务器已成功关闭" if server_stopped else "停止命令已发送，但服务器进程仍在运行中。可能需要手动检查或使用 #kill 命令强制停止"
+            else:
+                result_message = "外部接入服务器停止命令已发送"
+            if kwargs.get('from_console', False):
+                print(result_message)
             
             return result_message
             
         except Exception as e:
             self.logger.error(f"执行stop命令失败: {e}", exc_info=True)
-            # 出错时也要执行关闭
-            await self._thorough_shutdown()
+            # 只有当前活动服务器出错时才清理全局连接，避免误断其他目标。
+            if locals().get('target_is_active', True):
+                await self._thorough_shutdown()
             error_msg = f"停止服务器失败: {e}"
             if kwargs.get('from_console', False):
                 print(error_msg)
             return error_msg
         
         finally:
-            self._is_stopping = False
+            self._stopping_servers.discard(stop_key)
+            self._is_stopping = bool(self._stopping_servers)
 
     async def _thorough_shutdown(self):
         """彻底关闭所有连接"""
         self.logger.info("执行彻底关闭操作...")
         
         # 第一步：通过连接管理器设置关闭模式
-        if hasattr(self.qq_server, 'connection_manager'):
+        if getattr(self.qq_server, 'connection_manager', None):
             await self.qq_server.connection_manager.set_shutdown_mode()
         
         # 第二步：强制关闭MSMP连接
         if self.msmp_client:
             try:
                 if hasattr(self.msmp_client, 'close_sync'):
-                    self.msmp_client.close_sync()
+                    await asyncio.to_thread(self.msmp_client.close_sync)
                 elif hasattr(self.msmp_client, 'close'):
                     await asyncio.wait_for(self.msmp_client.close(), timeout=3.0)
                 self.logger.info("MSMP连接已强制关闭")
@@ -1016,7 +1728,7 @@ class CommandHandlers:
         self._is_stopping = True
         
         # 第一步：通过连接管理器设置关闭模式，这会停止所有重连
-        if hasattr(self.qq_server, 'connection_manager'):
+        if getattr(self.qq_server, 'connection_manager', None):
             await self.qq_server.connection_manager.set_shutdown_mode()
         
         # 第二步：如果是立即关闭，强制关闭连接
@@ -1049,11 +1761,12 @@ class CommandHandlers:
         
         # 重置命令处理器的关闭标志
         self._is_stopping = False
+        self._stopping_servers.clear()
         if hasattr(self, '_shutdown_event'):
             self._shutdown_event.clear()
         
         # 重置连接管理器的关闭模式
-        if hasattr(self.qq_server, 'connection_manager'):
+        if getattr(self.qq_server, 'connection_manager', None):
             await self.qq_server.connection_manager.reset_shutdown_mode()
         
         # 重置MSMP客户端的关闭模式
@@ -1079,7 +1792,7 @@ class CommandHandlers:
                 self.rcon_client.socket = None
         
         # 清空连接缓存
-        if hasattr(self.qq_server, 'connection_manager'):
+        if getattr(self.qq_server, 'connection_manager', None):
             await self.qq_server.connection_manager.invalidate_all_caches()
         
         # 重置关闭标志
@@ -1093,32 +1806,67 @@ class CommandHandlers:
     async def handle_start(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理start命令(管理员) - 支持MSMP和RCON"""
         try:
-            # 第一步：重置关闭模式，允许重新连接
-            await self._reset_shutdown_mode()
-            
-            if self.qq_server.server_process and self.qq_server.server_process.poll() is None:
+            server_selector = str(kwargs.get('target_server_selector', '') or '').strip()
+            server_config = kwargs.get('target_server') or self.config_manager.resolve_server(server_selector)
+            if not server_config:
+                return f"未找到服务器: {server_selector}"
+
+            target_process = self.qq_server.get_server_process(server_config) if hasattr(self.qq_server, 'get_server_process') else self.qq_server.server_process
+            if target_process and target_process.poll() is None:
                 return "服务器已经在启动或运行中"
-            
-            start_script = self.config_manager.get_server_start_script()
+
+            target_msmp = kwargs.get('target_msmp_client') or kwargs.get('msmp_client')
+            target_rcon = kwargs.get('target_rcon_client') or kwargs.get('rcon_client')
+            if target_msmp:
+                try:
+                    if await asyncio.to_thread(target_msmp.is_connected):
+                        return "服务器已通过外部接入运行 (MSMP)，无需启动本地进程"
+                except Exception:
+                    pass
+            if target_rcon:
+                try:
+                    if await asyncio.to_thread(target_rcon.is_connected):
+                        return "服务器已通过外部接入运行 (RCON)，无需启动本地进程"
+                except Exception:
+                    pass
+
+            # 确实需要启动本地进程时，再重置关闭模式，允许重新连接。
+            await self._reset_shutdown_mode()
+
+            server_section = server_config.get('server', {}) if isinstance(server_config.get('server'), dict) else {}
+            if self.qq_server and hasattr(self.qq_server, '_server_script_paths'):
+                start_script, _working_dir = self.qq_server._server_script_paths(server_config)
+            else:
+                start_script = str(server_section.get('start_script') or '').strip()
+                if start_script and not os.path.isabs(start_script):
+                    start_script = os.path.abspath(start_script)
             if not start_script:
                 return (
                     "服务器启动脚本未配置\n"
-                    "请在 config.yml 中配置 server.start_script"
+                    "请在对应 servers/*.yml 中配置 server.start_script"
                 )
             
             if not os.path.exists(start_script):
                 return f"启动脚本不存在: {start_script}"
             
-            await self.qq_server._start_server_process(websocket, group_id)
+            started = await self.qq_server._start_server_process(
+                websocket,
+                group_id,
+                private_user_id=user_id if is_private else None,
+                server_config=server_config
+            )
+            if not started:
+                return None
             
             connection_info = []
-            if self.config_manager.is_msmp_enabled():
+            if (server_config.get('msmp') or {}).get('enabled', False):
                 connection_info.append("MSMP")
-            if self.config_manager.is_rcon_enabled():
+            if (server_config.get('rcon') or {}).get('enabled', False):
                 connection_info.append("RCON")
             
-            if connection_info and websocket and not websocket.closed:
-                info_msg = f"正在启动服务器...启动后，将自动尝试连接: {', '.join(connection_info)}"
+            if connection_info and self.qq_server._websocket_open(websocket):
+                server_name = server_config.get('name', '默认服务器')
+                info_msg = f"正在启动 {server_name}...启动后，将自动尝试连接: {', '.join(connection_info)}"
                 if is_private:
                     await self.qq_server.send_private_message(websocket, user_id, info_msg)
                 else:
@@ -1130,39 +1878,15 @@ class CommandHandlers:
             self.logger.error(f"执行start命令失败: {e}")
             return f"启动服务器失败: {e}"
 
-    async def _reset_shutdown_mode(self):
-        """重置关闭模式"""
-        # 检查是否已经在正常模式
-        if not self._is_stopping and not (hasattr(self, '_shutdown_event') and self._shutdown_event.is_set()):
-            self.logger.debug("已在正常模式")
-            return
-        
-        self.logger.info("重置关闭模式")
-        
-        # 重置命令处理器的关闭标志
-        self._is_stopping = False
-        if hasattr(self, '_shutdown_event'):
-            self._shutdown_event.clear()
-        
-        # 重置连接管理器的关闭模式
-        if hasattr(self.qq_server, 'connection_manager'):
-            await self.qq_server.connection_manager.reset_shutdown_mode()
-        
-        # 重置MSMP客户端的关闭模式
-        if self.msmp_client and hasattr(self.msmp_client, '_shutdown_mode'):
-            self.msmp_client._shutdown_mode = False
-        
-        # 清空连接缓存
-        if hasattr(self.qq_server, 'connection_manager'):
-            await self.qq_server.connection_manager.invalidate_all_caches()
-        
-        # 重置关闭标志
-        if hasattr(self, '_connections_closed'):
-            self._connections_closed = False
-        if hasattr(self, '_shutdown_initiated'):
-            self._shutdown_initiated = False
-        
-        self.logger.debug("关闭模式已重置")
+    async def handle_mc(self, command_text: str = "", **kwargs) -> str:
+        """向 Bot 托管的目标 MC 服务端 stdin 写入控制台命令。"""
+        command = str(command_text or "").strip()
+        if not command:
+            return "用法: mc <服务器编号或名称> <MC控制台命令>"
+        if not self.qq_server or not hasattr(self.qq_server, 'send_server_stdin'):
+            return "Bot托管控制台不可用"
+        target_server = kwargs.get('target_server') or {}
+        return await self.qq_server.send_server_stdin(command, target_server)
     
     async def handle_reload(self, user_id: int, **kwargs) -> str:
         """处理reload命令(管理员)"""
@@ -1176,8 +1900,17 @@ class CommandHandlers:
     async def handle_log(self, user_id: int, **kwargs) -> str:
         """处理log命令 - 显示最近的服务器日志"""
         try:
-            server_running = self.qq_server.server_process and self.qq_server.server_process.poll() is None
-            recent_logs = self.qq_server.get_recent_logs(20)
+            target_server = kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None) or {}
+            target_process = (
+                self.qq_server.get_server_process(target_server)
+                if hasattr(self.qq_server, 'get_server_process') and target_server
+                else self.qq_server.server_process
+            )
+            if not target_process and not (hasattr(self.qq_server, '_runtime_for_server') and self.qq_server._runtime_for_server(target_server)):
+                return "该服务器没有Bot托管日志，外部接入服务器请查看对应服务端控制台"
+
+            server_running = target_process and target_process.poll() is None
+            recent_logs = self.qq_server.get_recent_logs(20, target_server)
             
             if not recent_logs:
                 return "暂无服务器日志输出"
@@ -1200,7 +1933,7 @@ class CommandHandlers:
             message = "\n".join(lines)
             
             # 如果消息过长，分多条发送
-            max_length = self.config_manager.get_max_message_length() if self.config_manager else 2500
+            max_length = self._target_advanced_config(target_server, 'max_message_length', self.config_manager.get_max_message_length()) if self.config_manager else 2500
             
             if len(message) > max_length:
                 # 分页显示
@@ -1233,12 +1966,24 @@ class CommandHandlers:
     async def handle_reconnect(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理reconnect命令 - 手动重连服务器"""
         try:
-            if is_private:
+            target_server = kwargs.get('target_server') or {}
+            target_is_active = self._target_is_active_server(target_server)
+            if websocket and is_private:
                 await self.qq_server.send_private_message(websocket, user_id, "正在尝试重新连接服务器...")
-            else:
+            elif websocket:
                 await self.qq_server.send_group_message(websocket, group_id, "正在尝试重新连接服务器...")
-            
-            results = await self.qq_server.connection_manager.reconnect_all()
+
+            target_msmp = kwargs.get('target_msmp_client') or kwargs.get('msmp_client')
+            target_rcon = kwargs.get('target_rcon_client') or kwargs.get('rcon_client')
+            if target_msmp or target_rcon:
+                results = {
+                    'msmp': await asyncio.to_thread(target_msmp.is_connected) if target_msmp else False,
+                    'rcon': await asyncio.to_thread(target_rcon.is_connected) if target_rcon else False,
+                }
+            elif target_is_active:
+                results = await self.qq_server.connection_manager.reconnect_all()
+            else:
+                return "目标服务器连接未就绪，请检查该服务器的 MSMP/RCON 配置"
             
             message_lines = ["重连结果:", "■■■■■■■■■■■■■■"]
             
@@ -1261,15 +2006,23 @@ class CommandHandlers:
     async def handle_reconnect_msmp(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理reconnect_msmp命令 - 手动重连MSMP"""
         try:
-            if not self.config_manager.is_msmp_enabled():
+            target_server = kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None) or {}
+            target_is_active = self._target_is_active_server(target_server)
+            if not self._target_protocol_enabled(target_server, 'msmp'):
                 return "MSMP未启用，无法重连"
             
-            if is_private:
+            if websocket and is_private:
                 await self.qq_server.send_private_message(websocket, user_id, "正在重连MSMP服务器...")
-            else:
+            elif websocket:
                 await self.qq_server.send_group_message(websocket, group_id, "正在重连MSMP服务器...")
-            
-            success = await self.qq_server.connection_manager.reconnect_msmp()
+
+            target_msmp = kwargs.get('target_msmp_client') or kwargs.get('msmp_client')
+            if target_msmp:
+                success = await asyncio.to_thread(target_msmp.is_connected)
+            elif target_is_active:
+                success = await self.qq_server.connection_manager.reconnect_msmp()
+            else:
+                return "目标服务器MSMP连接未就绪，请检查该服务器MSMP配置"
             
             if success:
                 return "MSMP重连成功"
@@ -1283,15 +2036,23 @@ class CommandHandlers:
     async def handle_reconnect_rcon(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理reconnect_rcon命令 - 手动重连RCON"""
         try:
-            if not self.config_manager.is_rcon_enabled():
+            target_server = kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None) or {}
+            target_is_active = self._target_is_active_server(target_server)
+            if not self._target_protocol_enabled(target_server, 'rcon'):
                 return "RCON未启用，无法重连"
             
-            if is_private:
+            if websocket and is_private:
                 await self.qq_server.send_private_message(websocket, user_id, "正在重连RCON服务器...")
-            else:
+            elif websocket:
                 await self.qq_server.send_group_message(websocket, group_id, "正在重连RCON服务器...")
-            
-            success = await self.qq_server.connection_manager.reconnect_rcon()
+
+            target_rcon = kwargs.get('target_rcon_client') or kwargs.get('rcon_client')
+            if target_rcon:
+                success = await asyncio.to_thread(target_rcon.is_connected)
+            elif target_is_active:
+                success = await self.qq_server.connection_manager.reconnect_rcon()
+            else:
+                return "目标服务器RCON连接未就绪，请检查该服务器RCON配置"
             
             if success:
                 return "RCON重连成功"
@@ -1304,34 +2065,56 @@ class CommandHandlers:
 
     async def handle_kill(self, user_id: int, group_id: int, websocket, is_private: bool = False, **kwargs) -> str:
         """处理kill命令(管理员) - 强制杀死服务器进程"""
-        return await self._execute_kill_command(user_id, group_id, websocket, is_private)
+        target_server = kwargs.get('target_server') or {}
+        return await self._execute_kill_command(user_id, group_id, websocket, is_private, target_server=target_server)
+
+    @staticmethod
+    def _same_server_config(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        left_key = (left or {}).get('_config_file') or (left or {}).get('name')
+        right_key = (right or {}).get('_config_file') or (right or {}).get('name')
+        return bool(left_key and right_key and str(left_key).lower() == str(right_key).lower())
     
-    async def _execute_kill_command(self, user_id: int = 0, group_id: int = 0, websocket = None, is_private: bool = False) -> str:
+    async def _execute_kill_command(self, user_id: int = 0, group_id: int = 0, websocket = None, is_private: bool = False, target_server: Optional[Dict[str, Any]] = None) -> str:
         """通用的kill命令执行方法"""
         try:
-            if not self.qq_server or not self.qq_server.server_process:
+            target_process = (
+                self.qq_server.get_server_process(target_server)
+                if self.qq_server and hasattr(self.qq_server, 'get_server_process') and target_server
+                else (self.qq_server.server_process if self.qq_server else None)
+            )
+            if not self.qq_server or not target_process:
                 return "服务器进程未运行"
             
-            if self.qq_server.server_process.poll() is not None:
+            if target_process.poll() is not None:
                 return "服务器进程已经停止"
             
             # ============ 触发服务器停止事件 ============
             if hasattr(self.qq_server, 'plugin_manager') and self.qq_server.plugin_manager:
                 self.logger.info("触发 server_stopping 事件给所有插件 (kill命令)")
-                await self.qq_server.plugin_manager.trigger_event("server_stopping")
+                event_server = target_server or getattr(self.qq_server, 'active_server_config', None) or {}
+                await self.qq_server.plugin_manager.trigger_event(
+                    "server_stopping",
+                    target_server=event_server,
+                    target_server_name=event_server.get('name', '')
+                )
             # ============ 事件触发结束 ============
             
             # 设置手动kill标记
-            self.qq_server._manual_kill = True
+            if target_server and hasattr(self.qq_server, 'set_server_manual_kill'):
+                self.qq_server.set_server_manual_kill(target_server, True)
+            else:
+                self.qq_server._manual_kill = True
 
-            # 立即执行统一关闭操作
-            await self._immediate_shutdown()
+            active_server = getattr(self.qq_server, 'active_server_config', None) or {}
+            if not target_server or self._same_server_config(target_server, active_server):
+                # 只关闭当前全局连接绑定服务器，避免 kill 2 误断 server1。
+                await self._immediate_shutdown()
                         
             import signal
             import subprocess
             
             try:
-                pid = self.qq_server.server_process.pid
+                pid = target_process.pid
                 self.logger.info(f"强制终止进程 {pid}")
                 
                 if os.name == 'nt':
@@ -1366,7 +2149,7 @@ class CommandHandlers:
                 await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         None,
-                        self.qq_server.server_process.wait
+                        target_process.wait
                     ),
                     timeout=10.0
                 )
@@ -1384,10 +2167,17 @@ class CommandHandlers:
             # 等待日志采集完成
             await asyncio.sleep(2)
             
-            await self._thorough_cleanup()
+            await self._thorough_cleanup(target_server or getattr(self.qq_server, 'active_server_config', None) or {})
             
-            self.qq_server.server_process = None
-            self.qq_server._close_log_file()
+            if target_server and hasattr(self.qq_server, '_runtime_for_server'):
+                runtime = self.qq_server._runtime_for_server(target_server)
+                if runtime:
+                    runtime.process = None
+                    self.qq_server._close_log_file(runtime)
+                    self.qq_server._set_active_runtime(None)
+            else:
+                self.qq_server.server_process = None
+                self.qq_server._close_log_file()
             
             return "服务器进程已强制中止"
             
@@ -1395,12 +2185,12 @@ class CommandHandlers:
             self.logger.error(f"执行kill命令失败: {e}", exc_info=True)
             return f"强制中止失败: {e}"
 
-    async def _thorough_cleanup(self):
+    async def _thorough_cleanup(self, server_config: Optional[Dict[str, Any]] = None):
         """彻底清理所有残留"""
         try:
             self.logger.info("开始彻底清理残留资源...")
             
-            await self._force_clean_file_locks()
+            await self._force_clean_file_locks(server_config)
             await asyncio.sleep(3)
             
             self.logger.info("彻底清理完成")
@@ -1408,13 +2198,13 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"彻底清理失败: {e}")
 
-    async def _force_clean_file_locks(self):
+    async def _force_clean_file_locks(self, server_config: Optional[Dict[str, Any]] = None):
         """强制清理文件锁"""
         try:
-            working_dir = self.config_manager.get_server_working_directory()
+            working_dir = self._target_working_dir(server_config or getattr(self.qq_server, 'active_server_config', None) or {})
             if not working_dir:
-                start_script = self.config_manager.get_server_start_script()
-                working_dir = os.path.dirname(start_script)
+                self.logger.warning("无法清理文件锁：目标服务器未配置工作目录或启动脚本")
+                return
                 
             import time
             
@@ -1450,10 +2240,10 @@ class CommandHandlers:
             import os
             from pathlib import Path
             
-            working_dir = self.config_manager.get_server_working_directory()
+            target_server = kwargs.get('target_server') or getattr(self.qq_server, 'active_server_config', None) or {}
+            working_dir = self._target_working_dir(target_server)
             if not working_dir:
-                start_script = self.config_manager.get_server_start_script()
-                working_dir = os.path.dirname(start_script)
+                return "目标服务器未配置 server.working_directory 或 server.start_script"
             
             crash_dir = os.path.join(working_dir, "crash-reports")
             crash_path = Path(crash_dir)
@@ -1477,6 +2267,22 @@ class CommandHandlers:
         except Exception as e:
             self.logger.error(f"处理崩溃报告失败: {e}", exc_info=True)
             return f"处理崩溃报告失败: {e}"
+
+    def _target_advanced_config(self, target_server: Dict[str, Any], key: str, default: Any) -> Any:
+        advanced = (target_server or {}).get('advanced') or {}
+        return advanced.get(key, default)
+
+    def _target_working_dir(self, target_server: Dict[str, Any]) -> str:
+        if self.config_manager and hasattr(self.config_manager, 'get_server_working_directory'):
+            return self.config_manager.get_server_working_directory(target_server)
+        server_section = (target_server or {}).get('server') or {}
+        working_dir = str(server_section.get('working_directory') or '').strip().replace('\\', os.sep).replace('/', os.sep)
+        if working_dir:
+            return working_dir if os.path.isabs(working_dir) else os.path.abspath(working_dir)
+        start_script = str(server_section.get('start_script') or '').strip().replace('\\', os.sep).replace('/', os.sep)
+        if start_script and not os.path.isabs(start_script):
+            start_script = os.path.abspath(start_script)
+        return os.path.dirname(start_script) if start_script else ''
 
     async def handle_listeners(self, **kwargs) -> str:
         """处理 listeners 命令 - 显示所有自定义消息监听规则"""
@@ -1559,6 +2365,7 @@ class CommandHandlers:
             
             plugin_manager = self.qq_server.plugin_manager
             plugins = plugin_manager.plugins
+            target_server = kwargs.get('target_server') or {}
             
             if not plugins:
                 return "暂无已加载的插件"
@@ -1570,7 +2377,7 @@ class CommandHandlers:
                 # 检查是否是页码参数
                 if search_name.isdigit():
                     page_num = int(search_name)
-                    return await self._get_plugins_page(plugins, page_num)
+                    return await self._get_plugins_page(plugins, page_num, target_server=target_server)
                 
                 # 使用新的查找方法
                 plugin = plugin_manager.find_plugin_by_name(search_name)
@@ -1600,11 +2407,21 @@ class CommandHandlers:
                         break
                 
                 # 使用插件的 get_plugin_help 方法
+                server_enabled = plugin_manager.is_plugin_enabled_for_server(plugin_filename, target_server) if target_server else True
+                server_status_line = ""
+                if target_server:
+                    server_name = target_server.get('name') or target_server.get('_config_file') or '当前服务器'
+                    server_status_line = f"[{server_name}: {'启用' if server_enabled else '禁用'}]"
+                if target_server and not server_enabled:
+                    return self._format_plugin_basic_info(plugin, plugin_filename, target_server)
+
                 if hasattr(plugin, 'get_plugin_help'):
                     plugin_help = plugin.get_plugin_help()
                     if plugin_help and plugin_help.strip():
                         # 在帮助信息开头添加插件标识
                         help_lines = plugin_help.split('\n')
+                        if server_status_line:
+                            help_lines.insert(0, server_status_line)
                         if plugin_filename:
                             identifier_line = f"[插件文件: {plugin_filename}]"
                             if help_lines and not help_lines[0].startswith('['):
@@ -1614,19 +2431,25 @@ class CommandHandlers:
                         return '\n'.join(help_lines)
                     else:
                         # 如果插件没有提供帮助信息，显示基本信息
-                        return self._format_plugin_basic_info(plugin, plugin_filename)
+                        return self._format_plugin_basic_info(plugin, plugin_filename, target_server)
                 else:
                     # 如果插件没有 get_plugin_help 方法，显示基本信息
-                    return self._format_plugin_basic_info(plugin, plugin_filename)
+                    return self._format_plugin_basic_info(plugin, plugin_filename, target_server)
             
             # 没有参数时，显示第一页
-            return await self._get_plugins_page(plugins, 1)
+            return await self._get_plugins_page(plugins, 1, target_server=target_server)
             
         except Exception as e:
             self.logger.error(f"处理 plugins 命令失败: {e}", exc_info=True)
             return f"获取插件信息失败: {e}"
 
-    async def _get_plugins_page(self, plugins: Dict, page_num: int, plugins_per_page: int = 2) -> str:
+    async def _get_plugins_page(
+        self,
+        plugins: Dict,
+        page_num: int,
+        plugins_per_page: int = 2,
+        target_server: Optional[Dict[str, Any]] = None
+    ) -> str:
         """获取指定页的插件列表"""
         try:
             # 计算分页信息
@@ -1658,25 +2481,31 @@ class CommandHandlers:
                 lines.append(f"作者: {plugin.author}")
                 lines.append(f"说明: {plugin.description}")
                 lines.append(f"状态: {'启用' if plugin.enabled else '禁用'}")
+                server_enabled = True
+                if target_server:
+                    server_enabled = self.qq_server.plugin_manager.is_plugin_enabled_for_server(plugin_name, target_server)
+                    server_name = target_server.get('name') or target_server.get('_config_file') or '当前服务器'
+                    lines.append(f"{server_name}: {'启用' if server_enabled else '禁用'}")
                 
                 # 显示插件注册的命令
                 plugin_cmds = []
-                for cmd_name, cmd_info in self.qq_server.plugin_manager.command_handlers.items():
-                    handler = cmd_info.get('handler')
-                    # 检查处理器是否属于当前插件
-                    if handler and hasattr(handler, '__self__'):
-                        if handler.__self__ == plugin:
-                            names = cmd_info.get('names', [])
-                            description = cmd_info.get('description', '')
-                            admin_only = cmd_info.get('admin_only', False)
-                            
-                            if names:
-                                cmd_line = f"  • {' / '.join(names[:3])}"  # 最多显示3个别名
-                                if description:
-                                    cmd_line += f" - {description}"
-                                if admin_only:
-                                    cmd_line += " [管理员]"
-                                plugin_cmds.append(cmd_line)
+                if server_enabled:
+                    for cmd_name, cmd_info in self.qq_server.plugin_manager.command_handlers.items():
+                        handler = cmd_info.get('handler')
+                        # 检查处理器是否属于当前插件
+                        if handler and hasattr(handler, '__self__'):
+                            if handler.__self__ == plugin:
+                                names = cmd_info.get('names', [])
+                                description = cmd_info.get('description', '')
+                                admin_only = cmd_info.get('admin_only', False)
+                                
+                                if names:
+                                    cmd_line = f"  • {' / '.join(names[:3])}"  # 最多显示3个别名
+                                    if description:
+                                        cmd_line += f" - {description}"
+                                    if admin_only:
+                                        cmd_line += " [管理员]"
+                                    plugin_cmds.append(cmd_line)
                 
                 if plugin_cmds:
                     lines.append("插件命令:")
@@ -1711,7 +2540,12 @@ class CommandHandlers:
             self.logger.error(f"生成插件分页失败: {e}", exc_info=True)
             return f"生成插件列表失败: {e}"
 
-    def _format_plugin_basic_info(self, plugin, plugin_filename: str = None) -> str:
+    def _format_plugin_basic_info(
+        self,
+        plugin,
+        plugin_filename: str = None,
+        target_server: Optional[Dict[str, Any]] = None
+    ) -> str:
         """格式化插件基本信息"""
         lines = [
             f"【{plugin.name}】v{plugin.version}",
@@ -1722,6 +2556,10 @@ class CommandHandlers:
         
         if plugin_filename:
             lines.append(f"文件: {plugin_filename}.py")
+        if plugin_filename and target_server:
+            server_enabled = self.qq_server.plugin_manager.is_plugin_enabled_for_server(plugin_filename, target_server)
+            server_name = target_server.get('name') or target_server.get('_config_file') or '当前服务器'
+            lines.append(f"{server_name}: {'启用' if server_enabled else '禁用'}")
         
         lines.extend([
             "",
@@ -1734,7 +2572,7 @@ class CommandHandlers:
         """处理reload_plugin命令(管理员) - 重新加载插件"""
         try:
             from_console = kwargs.get('from_console', False)
-            if not from_console and not self.config_manager.is_admin(user_id):
+            if not from_console and not self.config_manager.is_server_admin(user_id, kwargs.get('target_server')):
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
@@ -1776,7 +2614,7 @@ class CommandHandlers:
         try:
             # 控制台调用时跳过权限检查
             from_console = kwargs.get('from_console', False)
-            if not from_console and not self.config_manager.is_admin(user_id):
+            if not from_console and not self.config_manager.is_server_admin(user_id, kwargs.get('target_server')):
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
@@ -1814,6 +2652,19 @@ class CommandHandlers:
             
             if not plugin_filename:
                 return f"无法确定插件的文件名: {search_name}"
+
+            target_server = kwargs.get('target_server') or {}
+            if target_server and hasattr(self.qq_server.plugin_manager, 'set_plugin_enabled_for_server'):
+                config_path = self.qq_server.plugin_manager.set_plugin_enabled_for_server(
+                    plugin_filename,
+                    target_server,
+                    False
+                )
+                server_name = target_server.get('name') or target_server.get('_config_file') or '当前服务器'
+                return (
+                    f"插件 '{plugin.name}' 已在服务器 {server_name} 禁用\n"
+                    f"配置文件: {config_path}"
+                )
             
             success = await self.qq_server.plugin_manager.unload_plugin(plugin_filename)
             
@@ -1831,7 +2682,7 @@ class CommandHandlers:
         try:
             # 控制台调用时跳过权限检查
             from_console = kwargs.get('from_console', False)
-            if not from_console and not self.config_manager.is_admin(user_id):
+            if not from_console and not self.config_manager.is_server_admin(user_id, kwargs.get('target_server')):
                 return "权限不足: 此命令仅限管理员使用"
             
             if not command_text:
@@ -1858,88 +2709,33 @@ class CommandHandlers:
                         existing_filename = filename
                         break
                 
+                target_server = kwargs.get('target_server') or {}
+                if existing_filename and target_server and hasattr(self.qq_server.plugin_manager, 'set_plugin_enabled_for_server'):
+                    config_path = self.qq_server.plugin_manager.set_plugin_enabled_for_server(
+                        existing_filename,
+                        target_server,
+                        True
+                    )
+                    server_name = target_server.get('name') or target_server.get('_config_file') or '当前服务器'
+                    return (
+                        f"插件 '{existing_plugin.name}' 已在服务器 {server_name} 启用\n"
+                        f"配置文件: {config_path}"
+                    )
+
                 if existing_filename:
                     return f"插件 '{existing_plugin.name}' (文件: {existing_filename}) 已经加载"
                 else:
                     return f"插件 '{existing_plugin.name}' 已经加载"
             
-            # 使用插件管理器的扫描功能查找插件文件
-            plugin_file = None
-            plugin_filename = None
-            
-            # 遍历所有可能的插件文件
-            plugin_files = list(self.qq_server.plugin_manager.plugin_dir.rglob("*.py"))
-            for file_path in plugin_files:
-                if file_path.name.startswith("_"):
-                    continue
-                
-                # 检查文件名是否匹配（不含.py）
-                file_stem = file_path.stem
-                relative_path = file_path.relative_to(self.qq_server.plugin_manager.plugin_dir)
-                
-                # 移除.py后缀的完整相对路径（用于模块名）
-                module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
-                
-                # 检查是否匹配搜索名称
-                if (search_name.lower() == file_stem.lower() or 
-                    search_name.lower() == module_name.lower()):
-                    plugin_file = file_path
-                    plugin_filename = module_name
-                    break
-            
-            # 如果直接匹配失败，尝试在所有插件文件中搜索匹配的名称
-            if not plugin_file:
-                for file_path in plugin_files:
-                    if file_path.name.startswith("_"):
-                        continue
-                    
-                    # 尝试加载模块并检查插件名称
-                    try:
-                        relative_path = file_path.relative_to(self.qq_server.plugin_manager.plugin_dir)
-                        module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
-                        
-                        spec = importlib.util.spec_from_file_location(module_name, file_path)
-                        if spec and spec.loader:
-                            module = importlib.util.module_from_spec(spec)
-                            spec.loader.exec_module(module)
-                            
-                            # 查找插件类
-                            plugin_class = None
-                            for item_name in dir(module):
-                                item = getattr(module, item_name)
-                                if (isinstance(item, type) and 
-                                    issubclass(item, BotPlugin) and 
-                                    item is not BotPlugin):
-                                    plugin_class = item
-                                    break
-                            
-                            if plugin_class:
-                                # 创建临时实例检查名称
-                                temp_plugin = plugin_class(self.logger)
-                                if (search_name.lower() in temp_plugin.name.lower() or 
-                                    search_name.lower() in module_name.lower()):
-                                    plugin_file = file_path
-                                    plugin_filename = module_name
-                                    break
-                    except Exception:
-                        continue
-            
-            if not plugin_file:
-                # 列出所有可用的插件文件
-                available_files = []
-                for file_path in self.qq_server.plugin_manager.plugin_dir.rglob("*.py"):
-                    if not file_path.name.startswith("_"):
-                        relative_path = file_path.relative_to(self.qq_server.plugin_manager.plugin_dir)
-                        module_name = str(relative_path).replace('.py', '').replace(os.sep, '.')
-                        available_files.append(module_name)
-                
+            plugin_filename = self.qq_server.plugin_manager.find_available_plugin_file(search_name)
+            if not plugin_filename:
+                available_files = sorted(self.qq_server.plugin_manager.get_available_plugin_files().keys())
                 if available_files:
                     return (
                         f"未找到插件文件: {search_name}\n"
                         f"可用的插件文件: {', '.join(available_files)}"
                     )
-                else:
-                    return f"未找到插件文件: {search_name}，插件目录为空"
+                return f"未找到插件文件: {search_name}，插件目录为空"
             
             # 尝试加载插件
             success = await self.qq_server.plugin_manager.load_plugin(plugin_filename)
@@ -1948,6 +2744,18 @@ class CommandHandlers:
                 # 再次确认插件确实加载成功
                 loaded_plugin = self.qq_server.plugin_manager.get_plugin(plugin_filename)
                 if loaded_plugin:
+                    target_server = kwargs.get('target_server') or {}
+                    if target_server and hasattr(self.qq_server.plugin_manager, 'set_plugin_enabled_for_server'):
+                        config_path = self.qq_server.plugin_manager.set_plugin_enabled_for_server(
+                            plugin_filename,
+                            target_server,
+                            True
+                        )
+                        server_name = target_server.get('name') or target_server.get('_config_file') or '当前服务器'
+                        return (
+                            f"插件 '{loaded_plugin.name}' 已加载并在服务器 {server_name} 启用\n"
+                            f"配置文件: {config_path}"
+                        )
                     return f"插件 '{loaded_plugin.name}' (文件: {plugin_filename}) 加载成功"
                 else:
                     self.logger.warning(f"插件 {plugin_filename} 加载返回成功但未找到插件实例")

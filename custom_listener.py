@@ -1,6 +1,7 @@
 import re
 import logging
 import asyncio
+import inspect
 import time
 import datetime
 import os
@@ -45,10 +46,10 @@ class RuleStatsPersistence:
         except Exception as e:
             logging.error(f"保存规则统计失败: {e}")
 
-    def save_rule_history(self, rule_name: str, history: TriggerHistory):
+    def save_rule_history(self, rule_key: str, history: TriggerHistory):
         """保存单个规则的历史数据"""
         stats = self.load_stats()
-        stats[rule_name] = {
+        stats[rule_key] = {
             'match_count': history.match_count,
             'last_match_time': history.last_match_time,
             'last_trigger_time': history.last_trigger_time,
@@ -95,6 +96,7 @@ class ListenerRule:
                  trigger_cooldown: int = 0,
                  daily_limit: int = 0,
                  conditions: List[Dict] = None,
+                 server_key: str = "",
                  logger: logging.Logger = None):
         
         self.name = name
@@ -108,6 +110,7 @@ class ListenerRule:
         self.trigger_cooldown = trigger_cooldown
         self.daily_limit = daily_limit
         self.conditions = self._parse_conditions(conditions or [])
+        self.server_key = server_key
         self.logger = logger or logging.getLogger(__name__)
         
         # 触发历史
@@ -122,6 +125,11 @@ class ListenerRule:
             self.compiled_pattern = re.compile(pattern, flags)
         except re.error as e:
             raise ValueError(f"规则 '{name}' 的正则表达式语法错误: {e}")
+
+    @property
+    def stats_key(self) -> str:
+        """多服务器下同名规则必须按服务器隔离统计和冷却。"""
+        return f"{self.server_key or 'default'}::{self.name}"
     
     def _validate_rule(self):
         """验证规则有效性"""
@@ -294,7 +302,7 @@ class ListenerRule:
         
         # 持久化保存
         if persistence:
-            persistence.save_rule_history(self.name, self.history)
+            persistence.save_rule_history(self.stats_key, self.history)
     
     def format_message(self, 
                   match: re.Match, 
@@ -470,6 +478,17 @@ class CustomMessageListener:
         self._register_default_context_providers()
         self.persistence = RuleStatsPersistence()
         self._load_rules_from_config()
+
+    def _websocket_open(self, websocket) -> bool:
+        if not websocket:
+            return False
+        closed = getattr(websocket, "closed", None)
+        if closed is not None:
+            return not closed
+        state = getattr(websocket, "state", None)
+        if state is not None:
+            return getattr(state, "name", "") == "OPEN"
+        return getattr(websocket, "close_code", None) is None
     
     def _register_default_context_providers(self):
         """注册默认的上下文提供器"""
@@ -492,36 +511,50 @@ class CustomMessageListener:
     def _load_rules_from_config(self):
         """从配置文件加载规则"""
         try:
-            rules_config = self.config_manager.config.get('custom_listeners', {}).get('rules', [])
-            
-            if not rules_config:
+            server_configs = self.config_manager.get_servers() if hasattr(self.config_manager, 'get_servers') else []
+            if not server_configs:
+                server_configs = [self.config_manager.config]
+
+            new_rules = []
+            for server_config in server_configs:
+                listeners_config = server_config.get('custom_listeners') or {}
+                if not listeners_config.get('enabled', False):
+                    self.logger.info("服务器 %s 自定义监听已禁用", server_config.get('name', '默认'))
+                    continue
+                rules_config = listeners_config.get('rules', [])
+                if not rules_config:
+                    self.logger.info("服务器 %s 未配置自定义监听规则", server_config.get('name', '默认'))
+                    continue
+                server_key = server_config.get('_config_file') or server_config.get('name') or ''
+
+                for rule_config in rules_config:
+                    try:
+                        rule = ListenerRule(
+                            name=rule_config.get('name', f'rule_{len(new_rules)}'),
+                            pattern=rule_config.get('pattern', ''),
+                            enabled=rule_config.get('enabled', True),
+                            qq_message=rule_config.get('qq_message', ''),
+                            server_command=rule_config.get('server_command', ''),
+                            description=rule_config.get('description', ''),
+                            case_sensitive=rule_config.get('case_sensitive', False),
+                            trigger_limit=rule_config.get('trigger_limit', 0),
+                            trigger_cooldown=rule_config.get('trigger_cooldown', 0),
+                            daily_limit=rule_config.get('daily_limit', 0),
+                            conditions=rule_config.get('conditions', []),
+                            server_key=server_key,
+                            logger=self.logger
+                        )
+                        new_rules.append(rule)
+                        self.logger.info(f"已加载监听规则: {rule.name} [{'可用' if rule.enabled else '禁用'}]")
+                    
+                    except ValueError as e:
+                        self.logger.error(f"加载监听规则失败: {e}")
+                        continue
+
+            if not new_rules:
                 self.logger.info("未配置自定义监听规则")
                 self.rules = []
                 return
-            
-            new_rules = []
-            for rule_config in rules_config:
-                try:
-                    rule = ListenerRule(
-                        name=rule_config.get('name', f'rule_{len(new_rules)}'),
-                        pattern=rule_config.get('pattern', ''),
-                        enabled=rule_config.get('enabled', True),
-                        qq_message=rule_config.get('qq_message', ''),
-                        server_command=rule_config.get('server_command', ''),
-                        description=rule_config.get('description', ''),
-                        case_sensitive=rule_config.get('case_sensitive', False),
-                        trigger_limit=rule_config.get('trigger_limit', 0),
-                        trigger_cooldown=rule_config.get('trigger_cooldown', 0),
-                        daily_limit=rule_config.get('daily_limit', 0),
-                        conditions=rule_config.get('conditions', []),
-                        logger=self.logger
-                    )
-                    new_rules.append(rule)
-                    self.logger.info(f"已加载监听规则: {rule.name} [{'可用' if rule.enabled else '禁用'}]")
-                    
-                except ValueError as e:
-                    self.logger.error(f"加载监听规则失败: {e}")
-                    continue
             
             self.rules = new_rules
             self.logger.info(f"共加载 {len(self.rules)} 个自定义监听规则")
@@ -529,8 +562,8 @@ class CustomMessageListener:
             # 恢复历史数据
             saved_stats = self.persistence.load_stats()
             for rule in self.rules:
-                if rule.name in saved_stats:
-                    stats = saved_stats[rule.name]
+                stats = saved_stats.get(rule.stats_key) or saved_stats.get(rule.name)
+                if stats:
                     rule.history.match_count = stats.get('match_count', 0)
                     rule.history.last_match_time = stats.get('last_match_time', 0)
                     rule.history.last_trigger_time = stats.get('last_trigger_time', 0)
@@ -571,7 +604,9 @@ class CustomMessageListener:
         处理消息并匹配规则
         """
         # 检查是否启用自定义监听功能
-        if not self.config_manager.is_custom_listeners_enabled():
+        target_server = (context or {}).get('target_server') or {}
+        target_key = target_server.get('_config_file') or target_server.get('name') or ''
+        if not target_key:
             return []
 
         matched_rules = []
@@ -587,6 +622,8 @@ class CustomMessageListener:
         
         for rule in self.rules:
             try:
+                if rule.server_key and rule.server_key != target_key:
+                    continue
                 match = rule.match(log_line)
                 
                 if match:
@@ -605,7 +642,7 @@ class CustomMessageListener:
                         if rule.server_command:
                             server_command = rule.format_message(match, rule.server_command, context)
                             if server_executor:
-                                await self._execute_server_command(server_executor, server_command)
+                                await self._execute_server_command(server_executor, server_command, target_server)
                         
                         # 第四步：更新历史记录（只有触发时才更新）
                         rule.update_history(triggered=True, persistence=self.persistence)
@@ -615,7 +652,7 @@ class CustomMessageListener:
                             self.logger.debug(f"规则 {rule.name} 匹配但不满足触发条件")
                     
                     # 第五步：更新统计信息
-                    self.rule_stats[rule.name]["total"] += 1
+                    self.rule_stats[rule.stats_key]["total"] += 1
                         
                 else:
                     # 不匹配，跳过
@@ -623,14 +660,14 @@ class CustomMessageListener:
                         
             except Exception as e:
                 self.logger.error(f"处理规则 {rule.name} 时出错: {e}", exc_info=True)
-                self.rule_stats[rule.name]["errors"] += 1
+                self.rule_stats[rule.stats_key]["errors"] += 1
                 continue
         
         return matched_rules
     
     async def _send_qq_messages(self, websocket, group_ids: List[int], message: str):
         """向QQ群发送消息"""
-        if not websocket or websocket.closed:
+        if not self._websocket_open(websocket):
             self.logger.warning("无法发送QQ消息: WebSocket连接已关闭")
             return
         
@@ -654,21 +691,58 @@ class CustomMessageListener:
         except Exception as e:
             self.logger.error(f"发送QQ消息失败: {e}", exc_info=True)
     
-    async def _execute_server_command(self, server_executor, command: str):
+    async def _execute_server_command(self, server_executor, command: str, target_server: Optional[Dict[str, Any]] = None):
         """执行服务器命令"""
         try:
             self.logger.info(f"执行监听触发的服务器命令: {command}")
-            
+
+            accepts_target = self._server_executor_accepts_target(server_executor)
+
             if asyncio.iscoroutinefunction(server_executor):
-                await server_executor(command)
+                if accepts_target:
+                    await asyncio.wait_for(server_executor(command, target_server), timeout=30.0)
+                else:
+                    await asyncio.wait_for(server_executor(command), timeout=30.0)
             else:
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, server_executor, command)
+                if accepts_target:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, server_executor, command, target_server),
+                        timeout=30.0
+                    )
+                else:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, server_executor, command),
+                        timeout=30.0
+                    )
             
             self.logger.info(f"服务器命令执行完成: {command}")
             
         except Exception as e:
             self.logger.error(f"执行服务器命令失败: {e}", exc_info=True)
+
+    def _server_executor_accepts_target(self, server_executor) -> bool:
+        """判断执行器是否支持 command, target_server 双参数。"""
+        try:
+            signature = inspect.signature(server_executor)
+        except (TypeError, ValueError):
+            return True
+
+        parameters = list(signature.parameters.values())
+        if any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in parameters):
+            return True
+
+        positional = [
+            param for param in parameters
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD
+            )
+        ]
+        return len(positional) >= 2 or any(
+            param.name in ("target_server", "server_config")
+            for param in parameters
+        )
     
     def get_rules_info(self) -> str:
         """获取所有规则的信息"""
@@ -752,13 +826,15 @@ class CustomMessageListener:
         }
         
         for rule in self.rules:
-            stats['rules'][rule.name] = {
+            stats['rules'][rule.stats_key] = {
+                'name': rule.name,
+                'server_key': rule.server_key,
                 'enabled': rule.enabled,
                 'match_count': rule.history.match_count,
                 'trigger_count': rule.history.trigger_times_today,
                 'last_match_time': rule.history.last_match_time,
                 'last_trigger_time': rule.history.last_trigger_time,
-                'errors': self.rule_stats[rule.name]['errors']
+                'errors': self.rule_stats[rule.stats_key]['errors']
             }
         
         return stats

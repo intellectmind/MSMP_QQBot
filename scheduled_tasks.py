@@ -15,6 +15,8 @@ class ScheduledTask:
     weekdays: List[int]  # 执行的星期 [0=周一, 6=周日]
     last_executed: Optional[float] = None
     enabled: bool = True
+    server_config: Dict[str, Any] = None
+    task_config: Dict[str, Any] = None
 
 
 class ScheduledTaskManager:
@@ -45,65 +47,78 @@ class ScheduledTaskManager:
     def _load_tasks_from_config(self):
         """从配置文件加载定时任务"""
         try:
-            scheduled_config = self.config_manager.config.get('scheduled_tasks', {})
-            
-            if not scheduled_config.get('enabled', False):
-                self.logger.info("定时任务已禁用")
+            servers = self.config_manager.get_servers() if hasattr(self.config_manager, 'get_servers') else []
+            if not servers:
+                self.logger.info("未配置独立服务器，定时任务已禁用")
                 return
             
-            # 加载自动启动任务
-            auto_start_config = scheduled_config.get('auto_start', {})
-            if auto_start_config.get('enabled', False):
-                start_times = auto_start_config.get('times', [])
-                start_weekdays = auto_start_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
-                
-                for i, time_str in enumerate(start_times):
-                    task = ScheduledTask(
-                        task_id=f"auto_start_{i}",
-                        task_type='start',
-                        scheduled_time=time_str,
-                        weekdays=start_weekdays,
-                        enabled=True
-                    )
-                    self.tasks.append(task)
-                    weekday_names = [self.WEEKDAY_NAMES[d] for d in start_weekdays]
-                    self.logger.info(f"已加载自动启动任务: {time_str} ({','.join(weekday_names)})")
+            for server_index, server_config in enumerate(servers, 1):
+                scheduled_config = (server_config.get('scheduled_tasks') or {})
+                server_name = server_config.get('name') or f'server{server_index}'
             
-            # 加载自动停止任务
-            auto_stop_config = scheduled_config.get('auto_stop', {})
-            if auto_stop_config.get('enabled', False):
-                stop_times = auto_stop_config.get('times', [])
-                stop_weekdays = auto_stop_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
-                
-                for i, time_str in enumerate(stop_times):
-                    task = ScheduledTask(
-                        task_id=f"auto_stop_{i}",
-                        task_type='stop',
-                        scheduled_time=time_str,
-                        weekdays=stop_weekdays,
-                        enabled=True
-                    )
-                    self.tasks.append(task)
-                    weekday_names = [self.WEEKDAY_NAMES[d] for d in stop_weekdays]
-                    self.logger.info(f"已加载自动停止任务: {time_str} ({','.join(weekday_names)})")
+                if not scheduled_config.get('enabled', False):
+                    self.logger.info("服务器 %s 定时任务已禁用", server_name)
+                    continue
             
-            # 加载自动重启任务
-            auto_restart_config = scheduled_config.get('auto_restart', {})
-            if auto_restart_config.get('enabled', False):
-                restart_times = auto_restart_config.get('times', [])
-                restart_weekdays = auto_restart_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
+                # 加载自动启动任务
+                auto_start_config = scheduled_config.get('auto_start', {})
+                if auto_start_config.get('enabled', False):
+                    start_times = auto_start_config.get('times', [])
+                    start_weekdays = auto_start_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
                 
-                for i, time_str in enumerate(restart_times):
-                    task = ScheduledTask(
-                        task_id=f"auto_restart_{i}",
-                        task_type='restart',
-                        scheduled_time=time_str,
-                        weekdays=restart_weekdays,
-                        enabled=True
-                    )
-                    self.tasks.append(task)
-                    weekday_names = [self.WEEKDAY_NAMES[d] for d in restart_weekdays]
-                    self.logger.info(f"已加载自动重启任务: {time_str} ({','.join(weekday_names)})")
+                    for i, time_str in enumerate(start_times):
+                        task = ScheduledTask(
+                            task_id=f"{server_name}_auto_start_{i}",
+                            task_type='start',
+                            scheduled_time=time_str,
+                            weekdays=start_weekdays,
+                            enabled=True,
+                            server_config=dict(server_config),
+                            task_config=dict(auto_start_config)
+                        )
+                        self.tasks.append(task)
+                        weekday_names = [self.WEEKDAY_NAMES[d] for d in start_weekdays]
+                        self.logger.info(f"已加载 {server_name} 自动启动任务: {time_str} ({','.join(weekday_names)})")
+            
+                # 加载自动停止任务
+                auto_stop_config = scheduled_config.get('auto_stop', {})
+                if auto_stop_config.get('enabled', False):
+                    stop_times = auto_stop_config.get('times', [])
+                    stop_weekdays = auto_stop_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
+                
+                    for i, time_str in enumerate(stop_times):
+                        task = ScheduledTask(
+                            task_id=f"{server_name}_auto_stop_{i}",
+                            task_type='stop',
+                            scheduled_time=time_str,
+                            weekdays=stop_weekdays,
+                            enabled=True,
+                            server_config=dict(server_config),
+                            task_config=dict(auto_stop_config)
+                        )
+                        self.tasks.append(task)
+                        weekday_names = [self.WEEKDAY_NAMES[d] for d in stop_weekdays]
+                        self.logger.info(f"已加载 {server_name} 自动停止任务: {time_str} ({','.join(weekday_names)})")
+            
+                # 加载自动重启任务
+                auto_restart_config = scheduled_config.get('auto_restart', {})
+                if auto_restart_config.get('enabled', False):
+                    restart_times = auto_restart_config.get('times', [])
+                    restart_weekdays = auto_restart_config.get('weekdays', [0, 1, 2, 3, 4, 5, 6])
+                
+                    for i, time_str in enumerate(restart_times):
+                        task = ScheduledTask(
+                            task_id=f"{server_name}_auto_restart_{i}",
+                            task_type='restart',
+                            scheduled_time=time_str,
+                            weekdays=restart_weekdays,
+                            enabled=True,
+                            server_config=dict(server_config),
+                            task_config=dict(auto_restart_config)
+                        )
+                        self.tasks.append(task)
+                        weekday_names = [self.WEEKDAY_NAMES[d] for d in restart_weekdays]
+                        self.logger.info(f"已加载 {server_name} 自动重启任务: {time_str} ({','.join(weekday_names)})")
             
             self.logger.info(f"共加载 {len(self.tasks)} 个定时任务")
             
@@ -198,8 +213,6 @@ class ScheduledTaskManager:
     async def _check_upcoming_tasks(self, current_time: datetime.datetime, current_weekday: int):
         """检查即将到达的任务并发送提前通知"""
         try:
-            scheduled_config = self.config_manager.config.get('scheduled_tasks', {})
-            
             for task in self.tasks:
                 if not task.enabled:
                     continue
@@ -219,7 +232,7 @@ class ScheduledTaskManager:
                 time_until_task = (task_datetime - current_time).total_seconds()
                 
                 if task.task_type == 'start':
-                    config = scheduled_config.get('auto_start', {})
+                    config = task.task_config or {}
                     pre_notify = config.get('pre_notify_seconds', 300)
                     
                     if 0 <= time_until_task < pre_notify and time_until_task > pre_notify - 10:
@@ -230,7 +243,7 @@ class ScheduledTaskManager:
                         )
                 
                 elif task.task_type == 'stop':
-                    config = scheduled_config.get('auto_stop', {})
+                    config = task.task_config or {}
                     warning_before = config.get('warning_before_seconds', 600)
                     
                     if 0 <= time_until_task < warning_before and time_until_task > warning_before - 10:
@@ -248,7 +261,7 @@ class ScheduledTaskManager:
                         )
                 
                 elif task.task_type == 'restart':
-                    config = scheduled_config.get('auto_restart', {})
+                    config = task.task_config or {}
                     warning_before = config.get('warning_before_seconds', 600)
                     
                     if 0 <= time_until_task < warning_before and time_until_task > warning_before - 10:
@@ -274,9 +287,11 @@ class ScheduledTaskManager:
             weekday_name = self.WEEKDAY_NAMES[current_time.weekday()]
             self.logger.info(f"执行定时任务: {task.task_id} ({task.task_type}) - {task.scheduled_time} ({weekday_name})")
             
+            local_running = self._is_local_server_running(task.server_config)
+            external_connected = await self._is_external_server_connected(task.server_config)
+
             if task.task_type == 'start':
-                if (self.qq_server.server_process and 
-                    self.qq_server.server_process.poll() is None):
+                if local_running or external_connected:
                     self.logger.warning(f"服务器已在运行,跳过启动任务")
                     await self._send_notify(task, "服务器已在运行,无需启动", 0)
                     return
@@ -289,8 +304,7 @@ class ScheduledTaskManager:
                     self.logger.warning("启动回调函数未设置")
             
             elif task.task_type == 'stop':
-                if not (self.qq_server.server_process and 
-                        self.qq_server.server_process.poll() is None):
+                if not local_running and not external_connected:
                     self.logger.warning(f"服务器未运行,跳过停止任务")
                     await self._send_notify(task, "服务器未运行,无需停止", 0)
                     return
@@ -303,8 +317,7 @@ class ScheduledTaskManager:
                     self.logger.warning("停止回调函数未设置")
             
             elif task.task_type == 'restart':
-                if not (self.qq_server.server_process and 
-                        self.qq_server.server_process.poll() is None):
+                if not local_running and not external_connected:
                     self.logger.warning(f"服务器未运行,跳过重启任务")
                     await self._send_notify(task, "服务器未运行,无需重启", 0)
                     return
@@ -314,8 +327,7 @@ class ScheduledTaskManager:
                 if self.on_stop_callback:
                     await self.on_stop_callback(task)
                 
-                scheduled_config = self.config_manager.config.get('scheduled_tasks', {})
-                restart_config = scheduled_config.get('auto_restart', {})
+                restart_config = task.task_config or {}
                 
                 wait_time = restart_config.get('wait_before_startup', 10)
                 self.logger.info(f"等待 {wait_time} 秒后重启服务器...")
@@ -328,6 +340,51 @@ class ScheduledTaskManager:
         
         except Exception as e:
             self.logger.error(f"执行定时任务失败: {e}", exc_info=True)
+
+    def _is_local_server_running(self, server_config: Optional[Dict[str, Any]] = None) -> bool:
+        if self.qq_server and hasattr(self.qq_server, 'is_server_process_running'):
+            return self.qq_server.is_server_process_running(server_config)
+        return bool(
+            self.qq_server and
+            self.qq_server.server_process and
+            self.qq_server.server_process.poll() is None
+        )
+
+    async def _is_external_server_connected(self, server_config: Optional[Dict[str, Any]] = None) -> bool:
+        connection_manager = getattr(self.qq_server, "connection_manager", None)
+        active_server = getattr(self.qq_server, "active_server_config", None) or {}
+        try:
+            if connection_manager and self._same_server_config(server_config, active_server):
+                return await connection_manager.is_any_connected()
+
+            rcon_client = self._build_per_call_rcon_client(server_config)
+            if rcon_client and await asyncio.to_thread(rcon_client.is_connected):
+                return True
+
+            msmp_client = self._build_per_call_msmp_client(server_config)
+            if msmp_client and await asyncio.to_thread(msmp_client.is_connected):
+                return True
+
+            return False
+        except Exception as e:
+            self.logger.debug(f"检查外部服务器连接失败: {e}")
+            return False
+
+    @staticmethod
+    def _same_server_config(left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]]) -> bool:
+        left_key = (left or {}).get('_config_file') or (left or {}).get('name')
+        right_key = (right or {}).get('_config_file') or (right or {}).get('name')
+        return bool(left_key and right_key and str(left_key).lower() == str(right_key).lower())
+
+    def _build_per_call_rcon_client(self, server_config: Optional[Dict[str, Any]]):
+        if not self.qq_server or not hasattr(self.qq_server, "_build_per_call_rcon_client"):
+            return None
+        return self.qq_server._build_per_call_rcon_client(server_config or {})
+
+    def _build_per_call_msmp_client(self, server_config: Optional[Dict[str, Any]]):
+        if not self.qq_server or not hasattr(self.qq_server, "_build_per_call_msmp_client"):
+            return None
+        return self.qq_server._build_per_call_msmp_client(server_config or {})
     
     async def _send_notify(self, task: ScheduledTask, message_template: str, countdown: int):
         """发送通知"""
